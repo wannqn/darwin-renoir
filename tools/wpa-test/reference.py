@@ -42,7 +42,9 @@ def case(n):
     ap, station = bytes([2] + [rnd.randrange(256) for _ in range(5)]), bytes([2] + [rnd.randrange(256) for _ in range(5)])
     anonce, snonce = rnd.randbytes(32), rnd.randbytes(32)
     rsn = bytes.fromhex('30140100000fac040100000fac040100000fac020000')      # CCMP, CCMP, PSK, no capabilities
-    group, group_index, group2 = rnd.randbytes(16), rnd.randint(1, 3), rnd.randbytes(16)
+    group_length = 32 if n % 2 else 16
+    rsn = rsn[:7] + bytes([2 if group_length == 32 else 4]) + rsn[8:]
+    group, group_index, group2 = rnd.randbytes(group_length), rnd.randint(1, 3), rnd.randbytes(group_length)
     version = rnd.choice([1, 2])
     counter = rnd.randrange(1 << 40)
     replay = lambda k: struct.pack('>Q', counter + k)
