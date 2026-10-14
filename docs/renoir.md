@@ -602,3 +602,14 @@ RPMh/power rollback, FT3658U, GPU profiles и 195 WPA checks прошли.
 
 `tools/test_renoir_sta_fallback.py` исполняет реальную ветку worker: ошибка,
 пауза без mutex, восстановление, отмена новым power/join и очистка fallback.
+
+
+Финальная аппаратная проверка варианта с паузой прошла:
+`logs/phone-upstream-backoff-result.log`. Подключение 80 МГц, DHCP
+192.168.1.186, DNS, HTTP 200 OK и HTTPS 200 за 0,11 с. Затем неправильный
+пароль вернул result 21 через 4,2 с; прежняя сеть восстановилась, IPv4 сохранился,
+DNS повторно прошёл, HTTPS вернул 200 за 0,12 с. Диагностическое задание
+com.redwood.netverify штатно завершилось exit(0) и больше не меняет соединение.
+Keychain и MobileWiFi тесты также прошли на этом ядре. Телефон оставлен в iOS
+с loader_return_after=0. Переключение и ручной join из Settings проверяются
+отдельно после завершения автоматических заданий.
