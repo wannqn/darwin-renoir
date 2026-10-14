@@ -339,6 +339,10 @@ redwood_virtio_input_init(void)
 	if (!PE_parse_boot_argn("virtio_input", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	if (!redwood_board_is("qemu-virt")) {
+		printf("virtio-input: MMIO transport is only available on qemu-virt\n");
+		return;
+	}
 	bus = ml_io_map(VIRTIO_BUS, VIRTIO_SLOTS * VIRTIO_SLOT_SIZE);
 	for (int slot = 0; slot < VIRTIO_SLOTS && device_count < MAX_DEVICES; slot++) {
 		struct input_device *d = &devices[device_count];

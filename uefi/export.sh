@@ -5,6 +5,20 @@
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 MU=../Mu-Silicium
+if [ -f "$MU/.xnu-device" ] && [ "$(cat "$MU/.xnu-device")" = renoir ]; then
+  # renoir already exists upstream; only its memory reservation belongs in an overlay.
+  git -C "$MU" diff -- Platforms/Xiaomi/renoirPkg > renoir.patch
+  git -C "$MU" diff -- BootShim Silicon > mu-silicium.patch
+  cp "$MU/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/XnuLoader.c" \
+    files/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/
+  # Keep the shared header's redwood default; apply.sh selects RAM-only logs for renoir.
+  sed 's/#define XNU_LOG_TO_STORAGE  0/#define XNU_LOG_TO_STORAGE  1/' \
+    "$MU/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/XnuLoader.h" > \
+    files/Silicon/Silicium/SiliciumPkg/Library/BootManagerLib/XnuLoader.h
+  git -C "$MU" rev-parse HEAD > BASE
+  echo "uefi/export.sh: saved renoir changes"
+  exit 0
+fi
 git -C $MU rev-parse HEAD > BASE
 git -C $MU diff -- BootShim Silicon > mu-silicium.patch
 rm -rf files

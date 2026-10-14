@@ -356,10 +356,14 @@ ramfs_vget_locked(struct ramfs_mount *rm, struct ramfs_node *node, vnode_t dvp, 
 /* ------------------------------------------------------------------------ */
 /* File contents                                                            */
 
-/* Make sure the page array has a slot for page `index`. The mount lock is held. */
+/* Make sure the page array has a slot for page `index`. The mount lock is held
+ * on entry and return. A normal write/truncate may wait outside it: XNU's
+ * kalloc_large always rejects Z_NOWAIT, even when plenty of RAM is free.
+ * The pager cannot wait; truncate/write reserve its slots ahead of time. */
 static int
-ramfs_grow_slots(struct ramfs_node *node, uint64_t index)
+ramfs_grow_slots(struct ramfs_node *node, uint64_t index, bool can_wait)
 {
+	struct ramfs_mount *rm = node->rn_mount;
 	uint64_t want = node->rn_nslots ? node->rn_nslots : 4;
 	void **slots;
 
@@ -367,11 +371,31 @@ ramfs_grow_slots(struct ramfs_node *node, uint64_t index)
 		return 0;
 	}
 	while (want <= index) {
+		if (want > UINT64_MAX / 2) {
+			return EFBIG;
+		}
 		want *= 2;
 	}
-	slots = kalloc_type(void *, want, Z_NOWAIT | Z_ZERO);
+	if (want > SIZE_MAX / sizeof(void *)) {
+		return EFBIG;
+	}
+	if (can_wait) {
+		lck_mtx_unlock(&rm->rm_lock);
+	}
+	slots = kalloc_type(void *, want, (can_wait ? Z_WAITOK : Z_NOWAIT) | Z_ZERO);
+	if (can_wait) {
+		lck_mtx_lock(&rm->rm_lock);
+	}
 	if (slots == NULL) {
-		return ENOSPC;
+		printf("ramfs: slot allocation failed: inode %llu, index %llu, slots %llu, bytes %llu\n",
+		    node->rn_ino, index, want, want * sizeof(void *));
+		return can_wait ? ENOMEM : ENOSPC;
+	}
+	/* Another writer may have grown the table while the lock was dropped.
+	 * The vnode keeps the node alive; copy the current table, never a snapshot. */
+	if (index < node->rn_nslots) {
+		kfree_type(void *, want, slots);
+		return 0;
 	}
 	if (node->rn_pages != NULL) {
 		memcpy(slots, node->rn_pages, node->rn_nslots * sizeof(void *));
@@ -388,17 +412,19 @@ ramfs_grow_slots(struct ramfs_node *node, uint64_t index)
  * the lock; it is consumed if the slot was empty. The mount lock is held.
  */
 static int
-ramfs_store(struct ramfs_node *node, uint64_t off, const void *src, size_t len, void **spare)
+ramfs_store(struct ramfs_node *node, uint64_t off, const void *src, size_t len, void **spare, bool can_wait)
 {
 	struct ramfs_mount *rm = node->rn_mount;
 	uint64_t index = off / PAGE_SIZE;
-	int error = ramfs_grow_slots(node, index);
+	int error = ramfs_grow_slots(node, index, can_wait);
 
 	if (error) {
 		return error;
 	}
 	if (node->rn_pages[index] == NULL) {
 		if (*spare == NULL || rm->rm_pages >= rm->rm_max_pages) {
+			printf("ramfs: page allocation failed: inode %llu, offset %llu, spare %p, pages %llu/%llu\n",
+			    node->rn_ino, off, *spare, rm->rm_pages, rm->rm_max_pages);
 			return ENOSPC;
 		}
 		node->rn_pages[index] = *spare;
@@ -847,6 +873,15 @@ ramfs_setattr(struct vnop_setattr_args *ap)
 	lck_mtx_lock(&rm->rm_lock);
 	if (VATTR_IS_ACTIVE(vap, va_data_size)) {
 		size = vap->va_data_size;
+		/* A shared mapping cannot extend EOF. Reserve its pointer table here,
+		 * while sleeping is possible, so pageout needs no large allocation. */
+		if (size > node->rn_size) {
+			int error = ramfs_grow_slots(node, (size - 1) / PAGE_SIZE, true);
+			if (error) {
+				lck_mtx_unlock(&rm->rm_lock);
+				return error;
+			}
+		}
 		ramfs_resize(node, size);
 		resized = true;
 		VATTR_SET_SUPPORTED(vap, va_data_size);
@@ -975,7 +1010,7 @@ ramfs_write(struct vnop_write_args *ap)
 			spare = kalloc_data(PAGE_SIZE, Z_WAITOK | Z_ZERO);
 		}
 		lck_mtx_lock(&rm->rm_lock);
-		error = ramfs_store(node, off, bounce, len, &spare);
+		error = ramfs_store(node, off, bounce, len, &spare, true);
 		lck_mtx_unlock(&rm->rm_lock);
 		if (error) {
 			/* nothing of this piece was stored: hand it back to the caller's count */
@@ -1006,7 +1041,7 @@ ramfs_write(struct vnop_write_args *ap)
 			    UBC_INVALIDATE);
 		}
 		/* a partial write is a success */
-		if (error == ENOSPC) {
+		if (error == ENOSPC || error == ENOMEM) {
 			error = 0;
 		}
 	}
@@ -1269,7 +1304,7 @@ ramfs_pageout(struct vnop_pageout_args *ap)
 		/* this may be the pageout daemon looking for memory: never wait for more of it here */
 		void *spare = kalloc_data(PAGE_SIZE, Z_NOWAIT | Z_ZERO);
 
-		error = ramfs_store(node, off + done, (const void *)(addr + done), len, &spare);
+		error = ramfs_store(node, off + done, (const void *)(addr + done), len, &spare, false);
 		if (spare != NULL) {
 			kfree_data(spare, PAGE_SIZE);
 		}

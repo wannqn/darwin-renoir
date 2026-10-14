@@ -1,5 +1,5 @@
 /*
- * The GPU of the POCO X5 Pro (redwood), an Adreno 642L, woken step by step up to a picture that
+ * The GPU of redwood (Adreno 642L) or renoir (Adreno 642), woken step by step up to a picture that
  * it fills and the panel shows. Every address below belongs to this phone, and nothing here is
  * touched unless a boot-arg asks for it.
  *
@@ -105,6 +105,9 @@
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+
+#include "redwood_adreno_profile.h"
+static const struct adreno_board_profile *gpu_profile;
 
 static uint32_t last_step, skip_steps, pause_ms = 2200, fine, watch_seconds = 20;
 static uint32_t step;                   /* the one being performed */
@@ -413,8 +416,8 @@ step_outside(void)
  */
 static struct block qfprom = { "qfprom", 0x00780000, 0x7000 };
 #define QFPROM_CORRECTED        0x4000
-#define QFPROM_GPU_SPEED_BIN    0x1e9
-#define QFPROM_GPU_GAMING_BIN   0x1f5
+#define QFPROM_GPU_SPEED_BIN    (gpu_profile->speed_fuse)
+#define QFPROM_GPU_GAMING_BIN   (gpu_profile->gaming_fuse)
 
 static uint32_t
 get8(struct block *b, const char *name, uint32_t offset)
@@ -443,7 +446,7 @@ step_fuses(void)
 	speed_bin = bin;
 	gaming = get8(&qfprom, "gaming bin", QFPROM_CORRECTED + QFPROM_GPU_GAMING_BIN) >> 5 & 1;
 	/* dt: qcom,gpu-models: 0xac and 0xbe are sold as Adreno 643, anything else is the 642L */
-	printf("adreno: %u: speed bin %u: an Adreno %s; gaming bin %u\n", step, bin, bin == 0xac || bin == 0xbe ? "643" : "642L",
+	printf("adreno: %u: speed bin %u: an Adreno %s; gaming bin %u\n", step, bin, gpu_profile == &adreno_redwood && (bin == 0xac || bin == 0xbe) ? "643" : gpu_profile->model,
 	    gaming);
 
 	announce("read the same fuses where the phone's device tree has them (0x780000)");
@@ -697,7 +700,7 @@ step_clocks(void)
  * clk-debug.c (mainline Linux has no counterpart).
  */
 #define GCC_DEBUG_MUX           0x62000         /* [9:0] which clock goes to the counter */
-#define GCC_DEBUG_MUX_GPUCC     0x146           /* ... the debug output of the GPU's clock controller */
+#define GCC_DEBUG_MUX_GPUCC     (gpu_profile->gcc_debug_gpucc)
 #define GCC_DEBUG_DIV           0x62004         /* [3:0] divider - 1; both controllers divide by 2 */
 #define GCC_DEBUG_CBCR          0x62008
 #define GCC_XO_DIV4_CBCR        0x6200c         /* the counter's time base: the crystal / 4, 4.8 MHz */
@@ -1689,7 +1692,7 @@ zap_header(uint64_t *phys)
 	uint64_t size = 0;
 	uint32_t segments, hashes;
 
-	header = image_file("fw", "a660_zap.mdt", &size);
+	header = image_file(gpu_profile->firmware_directory, "a660_zap.mdt", &size);
 	if (header == NULL) {
 		return false;
 	}
@@ -1785,7 +1788,7 @@ step_gmu_space(void)
 		return false;
 	}
 	announce("find the GMU's firmware, fw/a660_gmu.bin, in the small image, and make the memory it asks for");
-	gmu_firmware = image_file("fw", "a660_gmu.bin", &gmu_firmware_size);
+	gmu_firmware = image_file(gpu_profile->firmware_directory, "a660_gmu.bin", &gmu_firmware_size);
 	if (gmu_firmware == NULL) {
 		return false;
 	}
@@ -1916,7 +1919,7 @@ step_gmu_firmware(void)
 #define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
 #define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
 #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
-#define GMU_CHIP                0x06035000      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
+#define GMU_CHIP                adreno642_gmu_chip_id(gpu_profile->chip_id)      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
@@ -2323,9 +2326,7 @@ static uint32_t core_khz;               /* the 3D core's speed, as asked of the 
 static bool
 step_core_power(void)
 {
-	static const struct {
-		uint32_t khz, level;
-	} speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } };
+	const struct adreno_speed *speeds = gpu_profile->speeds;
 	static struct hfi_perf_table perf;
 	static struct hfi_bw_table bw;
 	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, HFI_NO_INDEX }, granted = 0, speed = 0;
@@ -2340,7 +2341,8 @@ step_core_power(void)
 		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
 		return false;
 	}
-	perf.gpu_levels = sizeof(speeds) / sizeof(speeds[0]);
+	perf.gpu_levels = gpu_profile->speed_count;
+	vote[2] = gpu_profile->default_speed;
 	for (unsigned i = 0; i < perf.gpu_levels; i++) {
 		perf.gpu[i].khz = speeds[i].khz;
 		perf.gpu[i].acd = 0xffffffff;           /* no adaptive clocking */
@@ -2605,7 +2607,7 @@ step_core_space(void)
 	}
 	PE_parse_boot_argn("adreno_stream1", &stream1, sizeof(stream1));
 	announce("make the 3D core's memory: its ring, its microcode (fw/a660_sqe.fw), a page to try writing to");
-	microcode = image_file("fw", "a660_sqe.fw", &size);
+	microcode = image_file(gpu_profile->firmware_directory, "a660_sqe.fw", &size);
 	if (microcode == NULL || size < 8 || size > 0x40000 ||
 	    !block_new(&core_space, &core_ring, CORE_RING_ADDRESS, CORE_RING_SIZE, PTE_CORE) ||
 	    !block_new(&core_space, &core_sqe, CORE_SQE_ADDRESS, (uint32_t)size - 4, PTE_CORE | PTE_READ_ONLY) ||
@@ -2689,7 +2691,7 @@ step_zap_load(void)
 	announce("ask TrustZone to give up a zap shader that a kernel before this one may have left");
 	printf("adreno: %u: %s\n", step, zap_unload() ? "TrustZone has given up what it had (it says so with none, too)" :
 	    "TRUSTZONE DOES NOT GIVE IT UP: the next answers tell whether it keeps one");
-	segment = image_file("fw", "a660_zap.b02", &size);
+	segment = image_file(gpu_profile->firmware_directory, "a660_zap.b02", &size);
 	if (segment == NULL || size == 0 || size > 0x1000) {
 		return false;
 	}
@@ -2700,15 +2702,23 @@ step_zap_load(void)
 	}
 	if (scm("to take the zap shader's signature", SCM_64 | SCM_SIP | SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_GPU,
 	    header, 0, &answer) != 0 || answer != 0) {
-		printf("adreno: %u: TrustZone does not take the signature (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
-		    "BEFORE, which is used as it is\n", step, answer);
+		printf("adreno: %u: TrustZone does not take the signature (%#llx)\n", step, answer);
+		if (gpu_profile == &adreno_renoir) {
+			printf("adreno: renoir: authentication not confirmed; GPU startup stops\n");
+			return false;
+		}
+		printf("adreno: using the zap shader presumed to remain from before (redwood)\n");
 		zap_is_loaded = true;
 		return true;
 	}
 	if (scm("where the image will be", SCM_64 | SCM_SIP | SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_GPU, ZAP_MEMORY, 0x1000,
 	    &answer) != 0 || answer != 0) {
-		printf("adreno: %u: TrustZone does not take the place (%#llx): TAKEN TO MEAN THAT IT KEEPS A ZAP SHADER FROM "
-		    "BEFORE, which is used as it is\n", step, answer);
+		printf("adreno: %u: TrustZone does not take the place (%#llx)\n", step, answer);
+		if (gpu_profile == &adreno_renoir) {
+			printf("adreno: renoir: zap memory setup not confirmed; GPU startup stops\n");
+			return false;
+		}
+		printf("adreno: using the zap shader presumed to remain from before (redwood)\n");
 		zap_is_loaded = true;
 		return true;
 	}
@@ -2769,7 +2779,7 @@ step_core_start(void)
 	put(&gpu, "cp_roq_thresholds_1", CP_ROQ_THRESHOLDS_1, 0x8040362c);
 	put(&gpu, "cp_lpac_prog_fifo_size", CP_LPAC_PROG_FIFO_SIZE, 0x20);
 	put(&gpu, "cp_mem_pool_size", CP_MEM_POOL_SIZE, 128);
-	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00200200);
+	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, gpu_profile->primitive_fifo | 0x200);
 	put(&gpu, "cp_ahb_cntl", CP_AHB_CNTL, 1);
 	/*
 	 * How textures in the GPU's own tiled and compressed layouts are laid out in memory (Linux's
@@ -2782,8 +2792,12 @@ step_core_start(void)
 	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
 	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
 	put(&gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
-	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | 0x1fffff);
+	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | gpu_profile->hang_cycles);
 	put(&gpu, "uche_client_pf", UCHE_CLIENT_PF, 1u << 7 | 1);
+	/* a6xx_start: A642 uses the A660 dual queue / almost-full configuration. */
+	if (gpu_profile == &adreno_renoir) {
+		put(&gpu, "uche_cmdq_config", GPU_WORD(0x0e3c), 0x66906);
+	}
 	put(&gpu, "cp_chicken_dbg", CP_CHICKEN_DBG, 1);
 	put(&gpu, "rbbm_gbif_client_qos_cntl", RBBM_GBIF_CLIENT_QOS_CNTL, 0);
 	put(&gpu, "cp_apriv_cntl", CP_APRIV_CNTL, 1u << 6 | 1u << 5 | 1u << 3 | 1u << 2 | 1u << 1);
@@ -3206,7 +3220,7 @@ redwood_adreno_quiesce(void)
  * far it has got (a "fence": a submission's number, written by the core when it is through
  * with it). The caller holds one lock around all of these.
  */
-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
+#define GPU_CHIP_ID             ((uint64_t)gpu_profile->chip_id)   /* dt: qcom,chipid */
 #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
 #define GPU_ADDRESSES_SIZE      0xe0000000ull
 #define GPU_FENCE_AT            0x40            /* in the scratch page */
@@ -3292,6 +3306,7 @@ redwood_gpu_ready(void)
 bool
 redwood_gpu_parameter(uint32_t which, uint64_t *value)
 {
+	if (gpu_profile == NULL) { return false; }
 	switch (which) {
 	case 0x01:                              /* GPU_ID: none, the chip ID says it */
 	case 0x06:                              /* GMEM_BASE */
@@ -3302,7 +3317,7 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
 		*value = 0;
 		return true;
 	case 0x02:                              /* GMEM_SIZE */
-		*value = 512 * 1024;
+		*value = gpu_profile->gmem_bytes;
 		return true;
 	case 0x03:                              /* CHIP_ID, with the speed bin above it */
 		*value = GPU_CHIP_ID | (uint64_t)speed_bin << 32;
@@ -3317,7 +3332,7 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
 		*value = 1;
 		return true;
 	case 0x10:                              /* HIGHEST_BANK_BIT */
-		*value = 14;
+		*value = gpu_profile->highest_bank_bit;
 		return true;
 	case 0x12:                              /* UBWC_SWIZZLE */
 		*value = 6;
@@ -3760,14 +3775,14 @@ start_by_itself(void)
 	}
 	image_asked_quietly = true;
 	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]) && missing == NULL; i++) {
-		if (image_file("fw", files[i], &size) == NULL) {
+		if (image_file(gpu_profile->firmware_directory, files[i], &size) == NULL) {
 			missing = files[i];
 		}
 	}
 	image_asked_quietly = false;
 	if (missing != NULL) {
-		printf("adreno: THE GPU IS NOT STARTED: the small image has no fw/%s (the phone's /vendor/firmware/%s goes into "
-		    "fw-gpu/); the system draws with its software renderer\n", missing, missing);
+		printf("adreno: THE GPU IS NOT STARTED: the small image has no %s/%s (the phone's /vendor/firmware/%s goes into "
+		    "fw-gpu/%s/); the system draws with its software renderer\n", gpu_profile->firmware_directory, missing, missing, gpu_profile->board);
 		return false;
 	}
 	return true;
@@ -3790,7 +3805,17 @@ redwood_adreno_init(void)
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
 
-	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
+	gpu_profile = adreno_profile_for_board(redwood_board_is("renoir") ? "renoir" :
+	    redwood_board_is("redwood") ? "redwood" : NULL);
+	if (gpu_profile == NULL) {
+		printf("adreno: disabled: unsupported physical board\n");
+		return;
+	}
+	if (gpu_profile == &adreno_renoir) {
+		printf("adreno: renoir A642 profile; hardware bring-up is experimental, starting at 285 MHz\n");
+	}
+
+	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only && gpu_profile == &adreno_redwood) {
 		display_probe();
 	}
 	if (!PE_parse_boot_argn("adreno", &last_step, sizeof(last_step))) {

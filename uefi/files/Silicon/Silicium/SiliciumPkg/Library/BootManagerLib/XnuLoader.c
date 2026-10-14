@@ -214,6 +214,9 @@ FlushLog ()
   UINTN                  BlockSize;
   UINTN                  WriteSize;
 
+  if (!XNU_LOG_TO_STORAGE) {
+    return;
+  }
   BlockIo = FindPartition (XNU_LOG_PARTITION);
   if (BlockIo == NULL) {
     return;

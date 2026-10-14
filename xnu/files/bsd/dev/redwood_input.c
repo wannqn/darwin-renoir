@@ -6,6 +6,7 @@
 #include <kern/thread_call.h>
 #include <libkern/libkern.h>
 #include <miscfs/devfs/devfs.h>
+#include <pexpert/device_tree.h>
 #include <sys/conf.h>
 #include <sys/errno.h>
 #include <sys/proc.h>
@@ -15,8 +16,28 @@
 
 #define TOUCH_QUEUE     512             /* records; a power of two */
 
+/* Never infer a physical board from hw.machine: it is an iPhone for iOS.
+ * Missing/unknown identity is deliberately not permission to access MMIO. */
+bool
+redwood_board_is(const char *name)
+{
+	DTEntry chosen;
+	const void *value;
+	unsigned int size;
+	size_t length = strlen(name) + 1;
+
+	return SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
+	       SecureDTGetProperty(chosen, "darwin-board", &value, &size) == kSuccess &&
+	       size == length && memcmp(value, name, length) == 0;
+}
+
 static LCK_GRP_DECLARE(touch_lck_grp, "redwood-touch");
 static LCK_MTX_DECLARE(touch_lock, &touch_lck_grp);
+/* APPS DRV2/TCS0 is shared by Renoir touch and Wi-Fi regulator requests. */
+static LCK_MTX_DECLARE(rpmh_slot_lock, &touch_lck_grp);
+void redwood_rpmh_lock(void) { lck_mtx_lock(&rpmh_slot_lock); }
+void redwood_rpmh_unlock(void) { lck_mtx_unlock(&rpmh_slot_lock); }
+
 static struct redwood_touch touch_queue[TOUCH_QUEUE];
 static uint32_t touch_head, touch_tail;        /* read from head, add at tail */
 
@@ -170,6 +191,7 @@ redwood_input_init(void)
 	redwood_cpufreq_init();
 	redwood_virtio_input_init();
 	redwood_goodix_init();
+	renoir_fts_init();
 	redwood_buttons_init();
 	redwood_battery_init();
 	redwood_net_init();

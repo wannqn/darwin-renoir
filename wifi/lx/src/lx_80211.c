@@ -107,6 +107,7 @@ struct lx_radio {
 	const char *handshake_why;
 	struct work_struct group_work;		/* a new group key, later on */
 	struct ieee80211_key_conf *pairwise_key, *group_key;
+	unsigned group_cipher;
 	volatile bool joined;			/* keys set: frames pass */
 	volatile bool joining;
 	int reached;				/* how far the access point has come as the driver's station (IEEE80211_STA_...) */
@@ -1247,8 +1248,8 @@ protection(const struct lx_target *target, unsigned *group_cipher)
 	for (; count != 0 && end - at >= 4; count--, at += 4) {
 		passphrase |= at[0] == 0x00 && at[1] == 0x0f && at[2] == 0xac && at[3] == 2;
 	}
-	if (*group_cipher != 4) {
-		return ("it ciphers frames to everybody with something other than CCMP (TKIP, for old stations), which is not done here");
+	if (*group_cipher != 4 && *group_cipher != 2) {
+		return ("its group cipher is neither CCMP nor TKIP");
 	}
 	if (!ccmp) {
 		return ("it does not offer CCMP");
@@ -1262,24 +1263,34 @@ protection(const struct lx_target *target, unsigned *group_cipher)
 	return (NULL);
 }
 
-/* A key for the driver to give the firmware: CCMP, for frames between us and the access point or for the group's. */
+/* Pairwise CCMP; group CCMP or TKIP. The firmware handles frame ciphers. */
 static struct ieee80211_key_conf *
 key_set(struct lx_radio *radio, const uint8_t *key, unsigned index, bool pairwise, int *error)
 {
-	struct ieee80211_key_conf *conf = kzalloc(sizeof(*conf) + 16, GFP_KERNEL);
+	unsigned cipher=pairwise ? 4 : radio->group_cipher;
+	unsigned length=pairwise ? 16 : radio->wpa.group_length;
+	if ((cipher!=2 && cipher!=4) || length!=(cipher==2 ? 32u : 16u) || index>3) {
+		*error=-EINVAL;return NULL;
+	}
+	struct ieee80211_key_conf *conf = kzalloc(sizeof(*conf) + length, GFP_KERNEL);
 
 	if (conf == NULL) {
 		*error = -ENOMEM;
 		return (NULL);
 	}
-	conf->cipher = WLAN_CIPHER_SUITE_CCMP;
+	conf->cipher = cipher==2 ? WLAN_CIPHER_SUITE_TKIP : WLAN_CIPHER_SUITE_CCMP;
 	conf->keyidx = (uint8_t)index;
-	conf->keylen = 16;
+	conf->keylen = (uint8_t)length;
 	conf->iv_len = 8;
-	conf->icv_len = 8;
+	conf->icv_len = cipher==2 ? 4 : 8;
 	conf->flags = pairwise ? IEEE80211_KEY_FLAG_PAIRWISE : 0;
 	conf->link_id = -1;
-	memcpy(conf->key, key, 16);
+	memcpy(conf->key, key, length);
+	if (cipher==2) {
+		/* GTK is in AP order; Linux key_conf wants station TX/RX Michael keys.
+		 * Same ordering as wpa_supplicant_install_gtk (hostap rsn_supp/wpa.c). */
+		memcpy(conf->key+16,key+24,8);memcpy(conf->key+24,key+16,8);
+	}
 	mutex_lock(&radio->wiphy->mtx);
 	*error = radio->ops->set_key(&radio->hw, SET_KEY, radio->vif, pairwise ? radio->sta : NULL, conf);
 	mutex_unlock(&radio->wiphy->mtx);
@@ -1293,7 +1304,7 @@ key_drop(struct lx_radio *radio, struct ieee80211_key_conf **conf, bool pairwise
 		mutex_lock(&radio->wiphy->mtx);
 		radio->ops->set_key(&radio->hw, DISABLE_KEY, radio->vif, pairwise ? radio->sta : NULL, *conf);
 		mutex_unlock(&radio->wiphy->mtx);
-		explicit_bzero((*conf)->key, 16);
+		explicit_bzero((*conf)->key, (*conf)->keylen);
 		kfree(*conf);
 		*conf = NULL;
 	}
@@ -1473,6 +1484,8 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 	if (obstacle != NULL || channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED)) {
 		return (ENOTSUP);
 	}
+
+	radio->group_cipher=group_cipher;
 
 	/* the key of the name and the passphrase, and what the handshake needs besides */
 	began = lx_os_nanoseconds();

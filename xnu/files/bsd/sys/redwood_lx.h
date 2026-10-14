@@ -52,6 +52,8 @@ void	 lx_os_wakeup(const void *address);			/* everyone asleep on it */
 void	 lx_os_random(void *buffer, unsigned long size);	/* bytes nobody can guess */
 /* a number given to the kernel when it was started ("wifi_lx=2"); 0 if it was not */
 unsigned lx_os_option(const char *name);
+/* Physical radio model: 0 WCN6750/AHB, 1 WCN6855 HW2.0/PCIe. */
+unsigned lx_os_radio_model(void);
 /* a file the driver asks for by the name Linux has for it, in place: 0, or an errno (ENOENT) */
 int	 lx_os_firmware(const char *name, const void **data, unsigned long *size);
 /* the processor that runs the radio's firmware: started, and up when this returns; 0 or an errno */

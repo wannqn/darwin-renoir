@@ -17,6 +17,7 @@
 #include <net/ethernet.h>
 #include <pexpert/pexpert.h>
 #include <sys/kpi_mbuf.h>
+#include <sys/redwood_input.h>
 #include <sys/redwood_net.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -285,6 +286,10 @@ redwood_virtio_net_init(void)
 	uint32_t enabled = 0;
 
 	if (!PE_parse_boot_argn("virtio_net", &enabled, sizeof(enabled)) || !enabled) {
+		return;
+	}
+	if (!redwood_board_is("qemu-virt")) {
+		printf("net: virtio MMIO transport is only available on qemu-virt\n");
 		return;
 	}
 	if (!virtio_net_start(virtio_link.address) || !redwood_net_attach(&virtio_link)) {

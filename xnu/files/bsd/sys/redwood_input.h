@@ -36,12 +36,16 @@ struct redwood_touch {
 };
 
 #ifdef KERNEL
+bool redwood_board_is(const char *name); /* /chosen/darwin-board, set by the matching loader */
 /* For drivers; not from interrupt context. */
 void redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 void redwood_input_init(void);
+void redwood_rpmh_lock(void);          /* APPS DRV2/TCS0 transaction; thread context only */
+void redwood_rpmh_unlock(void);
 void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
-void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
-void redwood_battery_init(void);        /* boot-arg battery=1: SOC/voltage/current from PM7250B fuel gauge */
+void redwood_goodix_init(void);         /* touchscreen=1 on redwood: Goodix or FocalTech */
+void redwood_battery_init(void);        /* battery=1 on redwood: PM7250B fuel gauge */
+void renoir_fts_init(void);             /* touchscreen=1 on renoir: FocalTech FT3658U */
 void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 void redwood_net_init(void);            /* en0, if there is something to carry its frames: sys/redwood_net.h */
 void redwood_cpufreq_init(void);        /* boot-arg cpufreq=1: the phone's processor at full speed */

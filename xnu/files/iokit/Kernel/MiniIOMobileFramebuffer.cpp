@@ -729,6 +729,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				/* the first picture: the kernel's text console must stop drawing over it */
 				fGraphics = true;
 				PE_initialize_console(NULL, kPEGraphicsMode);
+				PE_initialize_console(NULL, kPEReleaseScreen);
 			}
 			drawLayer(s, src, dst);
 			if (layer == 0) {
@@ -1184,11 +1185,18 @@ publishAccelerator(IOService * provider)
 extern "C" void
 MiniIOMobileFramebufferShow(const uint8_t * pixels, uint32_t width, uint32_t height, uint32_t rowBytes)
 {
+	static bool graphics = false;
 	uint32_t columns = width < vinfo.v_width ? width : (uint32_t) vinfo.v_width;
 	uint32_t rows = height < vinfo.v_height ? height : (uint32_t) vinfo.v_height;
 
 	if (vinfo.v_baseaddr == 0 || vinfo.v_depth != 32) {
 		return;
+	}
+	if (!graphics) {
+		/* Direct GPU presentation bypasses drawLayer's console handover. */
+		graphics = true;
+		PE_initialize_console(NULL, kPEGraphicsMode);
+		PE_initialize_console(NULL, kPEReleaseScreen);
 	}
 	for (uint32_t y = 0; y < rows; y++) {
 		memcpy((void *) (vinfo.v_baseaddr + (size_t) y * vinfo.v_rowbytes), pixels + (size_t) y * rowBytes,

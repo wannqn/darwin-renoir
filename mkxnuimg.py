@@ -21,12 +21,20 @@ FD_BASE, FD_SIZE = 0x9FD00000, 0x200000
 PAYLOAD_BASE, PAYLOAD_MAX = 0xF0000000, 0x04000000
 
 ap = argparse.ArgumentParser()
+ap.add_argument('--device', choices=('redwood', 'renoir'), default=os.environ.get('XL_DEVICE', 'redwood'))
 ap.add_argument('-p', '--payload')
-ap.add_argument('-o', '--output', default=os.path.join(HERE, 'xnu-redwood.img'))
+ap.add_argument('-o', '--output')
 ap.add_argument('--mode', default='RELEASE')
 args = ap.parse_args()
+if args.output is None:
+    args.output = os.path.join(HERE, f'xnu-{args.device}.img')
 
-fd_path = os.path.join(MU, f'Build/redwoodPkg/{args.mode}_CLANGPDB/FV/SILICIUM_UEFI.fd')
+fd_path = os.path.join(MU, f'Build/{args.device}Pkg/{args.mode}_CLANGPDB/FV/SILICIUM_UEFI.fd')
+marker = os.path.join(MU, '.xnu-device')
+if os.path.isfile(marker) and open(marker).read().strip() != args.device:
+    ap.error('Mu-Silicium was prepared for a different device; use a matching UEFI tree')
+if args.device == 'renoir' and (not os.path.isfile(fd_path) or not os.path.isfile(marker)):
+    ap.error('renoir requires a locally built UEFI prepared by uefi/apply.sh renoir; redwood prebuilt is incompatible')
 if os.path.isfile(fd_path):
     shim_dir = os.path.join(MU, 'BootShim')
     for f in ('BootShim.elf', 'BootShim.bin'):
@@ -36,7 +44,7 @@ if os.path.isfile(fd_path):
                            f'CFLAGS=--target=aarch64-linux-gnu -DPAYLOAD_BASE={PAYLOAD_BASE:#x}'],
                           cwd=shim_dir, stdout=subprocess.DEVNULL)
     parts = {'shim': os.path.join(shim_dir, 'BootShim.bin'), 'fd': fd_path,
-             'dtb': os.path.join(MU, 'Resources/DTBs/redwood.dtb'), 'ramdisk': os.path.join(MU, 'Resources/ramdisk'),
+             'dtb': os.path.join(MU, f'Resources/DTBs/{args.device}.dtb'), 'ramdisk': os.path.join(MU, 'Resources/ramdisk'),
              'mkbootimg': os.path.join(MU, 'Resources/Scripts/mkbootimg.py')}
 else:
     parts = {'shim': os.path.join(PREBUILT, 'BootShim.bin'), 'fd': os.path.join(PREBUILT, 'SILICIUM_UEFI.fd'),

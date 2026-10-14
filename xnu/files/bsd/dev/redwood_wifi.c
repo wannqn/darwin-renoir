@@ -176,6 +176,7 @@ extern kern_return_t thread_terminate(thread_t thread);
 static LCK_GRP_DECLARE(wifi_lock_group, "redwood-wifi");
 
 static uint32_t last_step, pause_ms = 2200, fine, watch_seconds = 3;
+static volatile bool renoir_transport_ready;
 static uint32_t step;                   /* the one being performed */
 static uint32_t new_from;               /* the first of the steps that have not been seen to work: they wait */
 static char last_write[96] = "nothing written";
@@ -328,7 +329,7 @@ redwood_wifi_option(const char *name)
 	static const struct {
 		const char *name;
 		uint32_t value;
-	} stands_for[] = { { "wifi_lx", 2 }, { "wifi_smmu", 2 }, { "wifi_station", 1 }, { "wifi_keep", 1 } };
+	} stands_for[] = { { "wifi_lx", 2 }, { "wifi_smmu", 2 }, { "wifi_station", 1 }, { "wifi_join", 1 }, { "wifi_keep", 1 } };
 	uint32_t value = 0;
 
 	for (unsigned i = 0; whole && i < sizeof(stands_for) / sizeof(stands_for[0]); i++) {
@@ -337,7 +338,7 @@ redwood_wifi_option(const char *name)
 		}
 	}
 	if (strcmp(name, "wifi_quiet") == 0) {
-		return quiet;
+		return PE_parse_boot_argn(name,&value,sizeof(value)) ? value : quiet;
 	}
 	PE_parse_boot_argn(name, &value, sizeof(value));
 	return value;
@@ -1267,7 +1268,7 @@ image_entry(const uint8_t *image, const struct packfs_super *super, const struct
  * is in fw-wifi/ there --, found in the memory of the RAM disk itself (see redwood_adreno.c).
  */
 static const uint8_t *
-image_file(const char *name, uint64_t *size)
+image_file_in(const char *directory, const char *name, uint64_t *size)
 {
 	for (int disk = 1; disk >= 0; disk--) {
 		const struct packfs_super *super;
@@ -1287,7 +1288,7 @@ image_file(const char *name, uint64_t *size)
 			continue;
 		}
 		file = (const struct packfs_dnode *)(base + super->ps_nodes_off);       /* the root directory */
-		file = image_entry((const uint8_t *)base, super, file, "fw");
+		file = image_entry((const uint8_t *)base, super, file, directory);
 		file = image_entry((const uint8_t *)base, super, file, name);
 		if (file != NULL && S_ISREG(file->pd_mode) && !(file->pd_flags & PACKFS_F_CHUNKED) &&
 		    file->pd_data + file->pd_size <= super->ps_image_size) {
@@ -1295,9 +1296,14 @@ image_file(const char *name, uint64_t *size)
 			return (const uint8_t *)base + file->pd_data;
 		}
 	}
-	printf("wifi: %u: no fw/%s in the small image: put the phone's /vendor/firmware_mnt/image/%s into fw-wifi/ and run "
-	    "userland/build.sh\n", step, name, name);
+	printf("wifi: %u: no %s/%s in the small image\n", step, directory, name);
 	return NULL;
+}
+
+static const uint8_t *
+image_file(const char *name, uint64_t *size)
+{
+	return image_file_in("fw",name,size);
 }
 
 /*
@@ -2734,6 +2740,8 @@ static struct {
 	bool there;
 } qrtr_servers[64];
 static uint32_t qrtr_peer;                      /* the DSP's node; 0: it has not said */
+static int (*radio_qrtr_send)(const void *,uint32_t);
+static void (*renoir_qrtr_input)(const uint8_t *,uint32_t);
 static uint32_t qrtr_next_port = QRTR_FIRST_PORT, qrtr_in, qrtr_out, qrtr_hellos;
 static thread_t link_thread_is;
 
@@ -2760,7 +2768,7 @@ qrtr_out_packet(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to
 	packet->to_node = to_node;
 	packet->to_port = to_port;
 	memcpy(packet + 1, data, length);
-	error = glink_send(packet, (uint32_t)sizeof(*packet) + padded);
+	error = radio_qrtr_send ? radio_qrtr_send(packet,(uint32_t)sizeof(*packet)+padded) : glink_send(packet, (uint32_t)sizeof(*packet) + padded);
 	kfree_data(packet, sizeof(*packet) + padded);
 	qrtr_out += error == 0;
 	return error;
@@ -3582,7 +3590,7 @@ smmu_look(void)
  */
 #define RADIO_ADDRESSES         0xa0000000ull
 #define RADIO_ADDRESSES_SIZE    0x10000000u
-#define RADIO_TABLES            32              /* of 4K: the root, one of the second level, and 2 MB of addresses each other */
+#define RADIO_TABLES            64              /* of 4K: the root, one of the second level, and 2 MB of addresses each other */
 #define RADIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11) /* a page; for requests of either
 	                                                                                  * privilege; shared, accessed, not
 	                                                                                  * global: Linux's for a device */
@@ -3766,15 +3774,24 @@ radio_space_faults(void)
 
 /* The radio's stream through a context with our tables. */
 static bool
-radio_space_on(void)
+radio_space_on_for(uint32_t stream, uint32_t mask)
 {
-	uint32_t smr = SMMU_SMR(radio_space.match), s2cr = SMMU_S2CR(radio_space.match), sees = 1u << 31 | RADIO_STREAM_MASK << 16 |
-	    RADIO_STREAM;
+	if (stream > 0x7fff || mask > 0x7fff) { return false; }
+	uint32_t matches=rd(apps_smmu.base+SMMU_IDR0)&255;
+	for (unsigned i=0; i<matches && SMMU_SMR(i)<0xc00; i++) {
+		uint32_t entry=rd(apps_smmu.base+SMMU_SMR(i));
+		if ((entry&0x80000000u) && (((entry^stream)&0x7fff)&~((entry>>16&0x7fff)|mask))==0) {
+			printf("wifi: stream %#x overlaps existing SMMU match %u; not changed\n",stream,i);
+			return false;
+		}
+	}
+	uint32_t smr = SMMU_SMR(radio_space.match), s2cr = SMMU_S2CR(radio_space.match), sees = 1u << 31 | mask << 16 |
+	    stream;
 	uint64_t root = kvtophys(radio_space.tables) | (uint64_t)radio_space.context << 48;     /* tagged with the context's number */
 
 	printf("wifi: %u: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets page tables of ours (root %#llx) and is switched on, and "
 	    "match register %u sends stream %#x mask %#x through it; before: smr %#x, s2cr %#x, the context's sctlr %#x\n", step,
-	    radio_space.context, root & PTE_ADDRESS, radio_space.match, RADIO_STREAM, RADIO_STREAM_MASK, radio_space.old_smr,
+	    radio_space.context, root & PTE_ADDRESS, radio_space.match, stream, mask, radio_space.old_smr,
 	    radio_space.old_s2cr, radio_space.old_sctlr);
 	sleep_ms(pause_ms);
 	put(&apps_smmu_context, "sctlr", SMMU_CB_SCTLR, 0);
@@ -3810,7 +3827,7 @@ radio_space_on(void)
 	    get(&apps_smmu_context, "ttbr0, low", SMMU_CB_TTBR0) != (uint32_t)root ||
 	    get(&apps_smmu_context, "ttbr0, high", SMMU_CB_TTBR0 + 4) != (uint32_t)(root >> 32)) {
 		printf("wifi: %u: THE SMMU DID NOT TAKE WHAT WAS WRITTEN: stream %#x is not going through context %u\n", step,
-		    RADIO_STREAM, radio_space.context);
+		    stream, radio_space.context);
 		return false;
 	}
 	get(&apps_smmu_context, "tcr", SMMU_CB_TCR);
@@ -3820,6 +3837,12 @@ radio_space_on(void)
 	printf("wifi: %u: THE RADIO'S STREAM GOES THROUGH CONTEXT %u of the SMMU, with our page tables\n", step, radio_space.context);
 	radio_space_faults();
 	return true;
+}
+
+static bool
+radio_space_on(void)
+{
+	return radio_space_on_for(RADIO_STREAM,RADIO_STREAM_MASK);
 }
 
 /* The stream goes nowhere again, and the context translates nothing: as they were found. */
@@ -3847,6 +3870,8 @@ radio_space_off(void)
 bool
 redwood_wifi_radio_map(uint64_t physical, uint64_t size, unsigned long long *address)
 {
+	if (redwood_board_is("renoir") && !renoir_transport_ready) { return false; }
+	if (renoir_transport_ready) { radio_space.wanted=2; }
 	size = (size + 4095) & ~4095ull;
 	if (radio_space.next + size > RADIO_ADDRESSES_SIZE) {
 		return false;
@@ -3898,6 +3923,7 @@ radio_space_try(void)
 bool
 redwood_wifi_dsp_is_up(void)
 {
+	if (redwood_board_is("renoir")) { return renoir_transport_ready; }
 	printf("wifi: %u: the driver asks for the firmware's processor: it %s\n", step, dsp_started && glink.open ? "has been up "
 	    "since step 11, with the link of step 13" : "IS NOT UP");
 	return dsp_started && glink.open;
@@ -3917,6 +3943,11 @@ redwood_wifi_driver_file(const char *name, uint64_t *size)
 	const char *last = strrchr(name, '/');
 
 	last = last == NULL ? name : last + 1;
+	if (redwood_board_is("renoir")) {
+		if (!strcmp(last,"board.bin")) { return image_file_in("fw-wifi-renoir","bd_k9gl.elf",size); }
+		if (!strcmp(last,"regdb.bin") || !strcmp(last,"m3.bin")) { return image_file_in("fw-wifi-renoir",last,size); }
+		return NULL;
+	}
 	for (unsigned i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
 		if (strcmp(last, files[i][0]) == 0) {
 			return image_file(files[i][1], size);
@@ -4027,9 +4058,13 @@ static bool(*const steps[])(void) = {
  * Where a run ends in order while the DSP runs (the run's time is up, the host asks for its
  * end), and when the steps are over: the DSP is stopped (dsp_shutdown()).
  */
+static volatile bool renoir_session_wanted,renoir_session_running;
+static void renoir_wifi_stop(void);
+
 void
 redwood_wifi_stop(void)
 {
+	if (redwood_board_is("renoir")) { renoir_wifi_stop();return; }
 	/* (a radio that is still on its way up is let get there first, or fail: half a minute at the most) */
 	for (unsigned ms = 0; whole_runs && ms < 40000; ms += 10) {
 		sleep_ms(10);
@@ -4055,9 +4090,12 @@ redwood_wifi_stop(void)
  * simply never run again. The DSP is asked first, for two seconds at most; whatever it says,
  * TrustZone is asked to shut it down.
  */
+static void renoir_mhi_quiesce(void);
+
 void
 redwood_wifi_quiesce(void)
 {
+	renoir_mhi_quiesce();
 	if (!dsp_started || dirty) {
 		return;
 	}
@@ -4181,6 +4219,644 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
  * Called while the system starts, before there is a root file system. With wifi_step=N the start
  * waits until the steps are over (see redwood_adreno_init()); with wifi=1 it does not.
  */
+/* Renoir is PCIe 17cb:1103 (CNSS calls it QCA6490; ath11k WCN6855), not
+ * redwood's on-SoC WCN6750/WPSS. Its host and MHI transport must be brought
+ * up separately. Explicit wifi_probe=1..15 experiments cover GCC/TLMM,
+ * host power/PHY, radio supply votes, PCIe enumeration, MHI register reads
+ * and an empty SMMU context. No probe uploads firmware or enables DMA.
+ * Register offsets: OKX 08bbb0c150ea gcc-shima.c, shima-gdsc.dtsi,
+ * shima-pcie.dtsi, pinctrl-shima.c and shima.dtsi.
+ */
+#include "renoir_pcie_phy.h"
+
+/* DRV2/TCS0 transactions share a mutex with FT3658U supply requests.
+ * Adreno uses its own GMU RSCC, not this APPS slot. Preserve slot programming. */
+static bool
+renoir_vrm_set_locked(const char *name, uint32_t millivolts, uint32_t enable, uint32_t mode)
+{
+	if (millivolts > 8191 || enable > 1 || mode > 7) { return false; }
+	const struct cmd_db_entry *resource = rpmh_resource(name, 0);
+	if (!resource || (resource->address >> 16 & 15) != 4) {
+		say("renoir-wifi: missing VRM resource %s\n", name);
+		return false;
+	}
+	need(&rsc);
+	vm_offset_t tcs = rsc.base + RSC_TCS(0);
+	for (unsigned i = 0; rd(tcs + TCS_STATUS) == 0; i++) {
+		if (i == 2000) { say("renoir-wifi: RPMh slot busy\n"); return false; }
+		sleep_us(100);
+	}
+	uint32_t saved[20];
+	static const uint32_t offsets[] = { 0, 0x10, 0x14, 0x1c,
+	    0x30, 0x34, 0x38, 0x44, 0x48, 0x4c, 0x58, 0x5c, 0x60 };
+	for (unsigned i = 0; i < sizeof(offsets)/sizeof(offsets[0]); i++) { saved[i] = rd(tcs + offsets[i]); }
+	saved[2] &= ~(1u << 24); /* never retrigger the previous owner's request */
+	wr(tcs + TCS_CONTROL, saved[2] & ~(1u << 24));
+	wr(tcs + TCS_CONTROL, saved[2] & ~((1u << 24) | (1u << 16)));
+	wr(tcs + 8, 1);
+	uint32_t values[] = { millivolts, enable, mode };
+	unsigned count = 3;
+	for (unsigned i = 0; i < count; i++) {
+		wr(tcs + TCS_COMMAND(i), 0x10108);
+		wr(tcs + TCS_COMMAND(i) + 4, resource->address + 4 * i);
+		wr(tcs + TCS_COMMAND(i) + 8, values[i]);
+	}
+	wr(tcs + 0x10, (1u << count) - 1);
+	wr(tcs + TCS_ENABLED, (1u << count) - 1);
+	wr(tcs, saved[0] | 1);
+	wr(tcs + TCS_CONTROL, 1u << 16);
+	wr(tcs + TCS_CONTROL, (1u << 16) | (1u << 24));
+	__asm__ volatile("dsb sy" ::: "memory");
+	bool done = false;
+	for (unsigned i = 0; i < 2000; i++) {
+		if (rd(tcs + 4) & 1) { done = true; break; }
+		sleep_us(100);
+	}
+	wr(tcs + TCS_CONTROL, 0);
+	wr(tcs + TCS_ENABLED, 0);
+	wr(tcs + 8, 1);
+	for (unsigned i = 0; i < sizeof(offsets)/sizeof(offsets[0]); i++) { wr(tcs + offsets[i], saved[i]); }
+	__asm__ volatile("dsb sy" ::: "memory");
+	say("renoir-wifi: regulator %s at %#x: %u mV enable %u mode %u: %s\n", name,
+	    resource->address, millivolts, enable, mode, done ? "acknowledged" : "TIMEOUT");
+	return done;
+}
+
+static bool
+renoir_vrm_set(const char *name, uint32_t millivolts, uint32_t enable, uint32_t mode)
+{
+	redwood_rpmh_lock();bool ok=renoir_vrm_set_locked(name,millivolts,enable,mode);
+	redwood_rpmh_unlock();return ok;
+}
+
+static bool
+renoir_pcie_ldo(const char *name, uint32_t millivolts, bool on)
+{
+	return renoir_vrm_set(name, millivolts, on ? 1 : 0, 7);
+}
+
+/* Read back APPS' VRM vote, not the aggregated physical rail state. RSC
+ * message layout: Qualcomm's rpmh_read support (Maulik Shah, edbafe65eef2).
+ * Keep this probe separate from the PMIC observer: AOP-owned regulator
+ * blocks need not have an entry in APPS' SPMI table.
+ */
+static bool
+renoir_rpmh_read_locked(const char *name, uint32_t offset, uint32_t *value)
+{
+	const struct cmd_db_entry *resource = rpmh_resource(name, 0);
+	if (!value || offset > 8 || (offset & 3) || !resource || (resource->address >> 16 & 15) != 4) { return false; }
+	need(&rsc);
+	if (((rd(rsc.base + RSC_ID) >> 16) & 255) >= 3) { return false; }
+	vm_offset_t tcs = rsc.base + RSC_TCS(0);
+	for (unsigned i = 0; rd(tcs + TCS_STATUS) == 0; i++) {
+		if (i == 2000) { say("renoir-wifi: RPMh read slot busy\n"); return false; }
+		sleep_us(100);
+	}
+	static const uint32_t offsets[] = { 0, 0x10, 0x14, 0x1c, 0x30, 0x34 };
+	uint32_t saved[6];
+	for (unsigned i=0; i<6; i++) { saved[i]=rd(tcs+offsets[i]); }
+	saved[2] &= ~(1u<<24);
+	wr(tcs+TCS_CONTROL,saved[2]);
+	wr(tcs+TCS_CONTROL,saved[2]&~(1u<<16));
+	wr(tcs+TCS_ENABLED,0);
+	wr(tcs+8,1);
+	wr(tcs+TCS_COMMAND(0),0x108); /* length 8 + response; WRITE bit is clear */
+	wr(tcs+TCS_COMMAND(0)+4,resource->address+offset);
+	wr(tcs+0x10,1);
+	wr(tcs+TCS_ENABLED,1);
+	wr(tcs,saved[0]|1);
+	wr(tcs+TCS_CONTROL,1u<<16);
+	wr(tcs+TCS_CONTROL,(1u<<16)|(1u<<24));
+	__asm__ volatile("dsb sy" ::: "memory");
+	bool done = false;
+	for (unsigned i=0; i<2000; i++) {
+		if (rd(tcs+4)&1) { done=true; break; }
+		sleep_us(100);
+	}
+	uint32_t status=rd(tcs+TCS_COMMAND(0)+12);
+	if (done && (status & 0x10100)==0x10100) { *value=rd(tcs+TCS_COMMAND(0)+16); }
+	else { done=false; say("renoir-wifi: RPMh read %s+%u failed: status %#x\n",name,offset,status); }
+	wr(tcs+TCS_CONTROL,0);
+	wr(tcs+TCS_ENABLED,0);
+	wr(tcs+8,1);
+	for (unsigned i=0; i<6; i++) { wr(tcs+offsets[i],saved[i]); }
+	__asm__ volatile("dsb sy" ::: "memory");
+	return done;
+}
+
+static bool
+renoir_rpmh_read(const char *name, uint32_t offset, uint32_t *value)
+{
+	redwood_rpmh_lock();bool ok=renoir_rpmh_read_locked(name,offset,value);
+	redwood_rpmh_unlock();return ok;
+}
+
+static void
+renoir_wifi_vote_survey(void)
+{
+	static const char *const names[] = { "smpc2", "smpb10", "smpb11", "smpb12", "ldoc11", "ldob6", "ldoc10" };
+	for (unsigned i=0; i<sizeof(names)/sizeof(names[0]); i++) {
+		uint32_t voltage, enable, mode;
+		if (!renoir_rpmh_read(names[i],0,&voltage) || !renoir_rpmh_read(names[i],4,&enable) ||
+		    !renoir_rpmh_read(names[i],8,&mode)) {
+			say("renoir-wifi: vote survey stopped at %s; no regulator writes\n",names[i]);
+			return;
+		}
+		say("renoir-wifi: APPS VRM vote %s: voltage %#x enable %#x mode %#x\n",names[i],voltage,enable,mode);
+	}
+}
+
+/* Radio rails, with APPS' previous votes saved before any write. A zero
+ * readback without bit31 means no earlier vote, restored as a zero vote.
+ * Other RPMh clients' votes are not modified. GPIO64 remains low here.
+ */
+struct renoir_radio_votes {
+	uint32_t saved[5][3];
+	unsigned changed;
+};
+static const char *const renoir_radio_rails[] = { "smpb10", "ldoc11", "smpc2", "smpb11", "smpb12" };
+
+static bool
+renoir_radio_power(struct renoir_radio_votes *votes, bool on)
+{
+	static const uint32_t millivolts[] = { 1800, 2800, 952, 1880, 1350 };
+	if (!on) {
+		bool restored = true;
+		while (votes->changed) {
+			unsigned i = --votes->changed;
+			uint32_t *v = votes->saved[i];
+			if (!renoir_vrm_set(renoir_radio_rails[i],v[0],v[1],v[2])) { restored=false; }
+		}
+		return restored;
+	}
+	bzero(votes,sizeof(*votes));
+	for (unsigned i=0; i<5; i++) {
+		for (unsigned j=0; j<3; j++) {
+			uint32_t value;
+			if (!renoir_rpmh_read(renoir_radio_rails[i],4*j,&value)) { return false; }
+			votes->saved[i][j]=value & (j==0 ? 8191u : j==1 ? 1u : 7u);
+		}
+	}
+	for (unsigned i=0; i<5; i++) {
+		votes->changed=i+1; /* include even a timed-out write in rollback */
+		if (!renoir_vrm_set(renoir_radio_rails[i],millivolts[i],1,7)) { return false; }
+		uint32_t voltage, enable;
+		if (!renoir_rpmh_read(renoir_radio_rails[i],0,&voltage) ||
+		    !renoir_rpmh_read(renoir_radio_rails[i],4,&enable) ||
+		    !(enable&1) || (voltage&8191)!=millivolts[i]) {
+			say("renoir-wifi: radio rail vote readback mismatch at %s\n",renoir_radio_rails[i]);
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Link-only experiment. No endpoint BAR access, firmware upload or DMA.
+ * GPIO timing and link bits follow OKX CNSS power.c / pci-msm.c.
+ */
+static bool renoir_mhi_runtime(vm_offset_t bar);
+#include "renoir_mhi_boot.h"
+#include "renoir_mhi_runtime.h"
+/* Assign a temporary 2 MiB BAR in shima-pcie's MEM aperture, read only the
+ * first 64 KiB of MHI registers, then restore the configuration. Endpoint
+ * bus mastering stays disabled throughout; no MHI doorbell is written.
+ */
+static bool
+renoir_pcie_mhi_survey(vm_offset_t dbi, vm_offset_t config, unsigned probe)
+{
+	uint32_t bar0=rd(config+0x10), bar1=rd(config+0x14), ep_cmd=rd(config+4)&0xffff;
+	if ((bar0&15)!=4 || (ep_cmd&4)) {
+		say("renoir-wifi: MHI survey refused: unexpected BAR or active bus master\n");
+		return false;
+	}
+	vm_offset_t bar=ml_io_map(0x60400000,0x10000), atu=dbi+0x1200;
+	if (!bar) { return false; }
+	uint32_t saved[7], root_cmd=rd(dbi+4)&0xffff, root_mem=rd(dbi+0x20);
+	for (unsigned i=0; i<7; i++) { saved[i]=rd(atu+4*i); }
+	wr(atu+4,0);
+	wr(atu,0); wr(atu+8,0x60400000); wr(atu+12,0); wr(atu+16,0x605fffff);
+	wr(atu+20,0x60400000); wr(atu+24,0); wr(atu+4,1u<<31);
+	bool enabled=false;
+	for (unsigned i=0; i<100; i++) {
+		if (rd(atu+4)&(1u<<31)) { enabled=true; break; }
+		sleep_us(10);
+	}
+	bool read=false;
+	if (enabled && (rd(dbi+0x80)&(1u<<29)) && (rd(dbi+0xf28)&0x400)) {
+		wr(config+0x10,0x60400004); wr(config+0x14,0);
+		wr(dbi+0x20,0x60506040); wr(dbi+4,root_cmd|2);
+		wr(config+4,(ep_cmd&~4u)|2);
+		__asm__ volatile("dsb sy" ::: "memory");
+		uint32_t bhi=rd(bar+0x28), bhie=rd(bar+0x2c);
+		say("renoir-wifi: MHI version %#x length %#x control %#x status %#x BHI %#x BHIE %#x\n",
+		    rd(bar+8),rd(bar),rd(bar+0x38),rd(bar+0x48),bhi,bhie);
+		if (bhi && !(bhi&3) && bhi<=0x10000-0x2c) {
+			say("renoir-wifi: MHI BHI execution environment %#x; firmware and DMA not started\n",rd(bar+bhi+0x28));
+			read=true;
+		}
+		if (read && ((probe >= 16 && probe <= 28))) { renoir_bhi_load(bar,config,dbi,probe); }
+		wr(config+4,ep_cmd&~6u);
+		wr(config+0x10,bar0); wr(config+0x14,bar1);
+		wr(config+4,ep_cmd);
+	}
+	wr(atu+4,0);
+	for (unsigned i=0; i<7; i++) { if (i!=1) { wr(atu+4*i,saved[i]); } }
+	wr(atu+4,saved[1]); wr(dbi+0x20,root_mem); wr(dbi+4,root_cmd);
+	__asm__ volatile("dsb sy" ::: "memory");
+	return read;
+}
+
+static bool
+renoir_pcie_config_probe(vm_offset_t dbi, unsigned probe)
+{
+	if (!(rd(dbi+0x80)&(1u<<29)) || !(rd(dbi+0xf28)&0x400)) { return false; }
+	vm_offset_t config=ml_io_map(0x60100000,0x4000), atu=dbi+0x1000;
+	if (!config) { return false; }
+	uint32_t saved[7], buses=rd(dbi+0x18);
+	for (unsigned i=0; i<7; i++) { saved[i]=rd(atu+4*i); }
+	wr(atu+4,0);
+	wr(dbi+0x18,(buses&0xff000000u)|0x10100); /* primary 0, secondary/subordinate 1 */
+	wr(atu,4); /* outbound CFG0 */
+	wr(atu+8,0x60100000); wr(atu+12,0); wr(atu+16,0x60100fff);
+	wr(atu+20,0x01000000); wr(atu+24,0); /* BDF 01:00.0 */
+	wr(atu+4,1u<<31);
+	__asm__ volatile("dsb sy" ::: "memory");
+	bool enabled=false, matched=false;
+	for (unsigned i=0; i<100; i++) {
+		if (rd(atu+4)&(1u<<31)) { enabled=true; break; }
+		sleep_us(10);
+	}
+	if (enabled && (rd(dbi+0x80)&(1u<<29)) && (rd(dbi+0xf28)&0x400)) {
+		uint32_t identity=rd(config);
+		matched=identity==0x110317cb;
+		say("renoir-wifi: endpoint 01:00.0 identity %#x expected WCN6855 %u\n",identity,matched);
+		if (matched) {
+			say("renoir-wifi: endpoint command/status %#x class/revision %#x BAR0 %#x; DMA not enabled by probe\n",
+			    rd(config+4),rd(config+8),rd(config+0x10));
+			if (probe == 13 || (probe >= 16 && probe <= 28)) { renoir_pcie_mhi_survey(dbi,config,probe); }
+		}
+	} else { say("renoir-wifi: endpoint config skipped: iATU or link unavailable\n"); }
+	wr(atu+4,0);
+	for (unsigned i=0; i<7; i++) { if (i!=1) { wr(atu+4*i,saved[i]); } }
+	wr(atu+4,saved[1]); wr(dbi+0x18,buses);
+	__asm__ volatile("dsb sy" ::: "memory");
+	return matched;
+}
+
+static bool
+renoir_pcie_link_probe(vm_offset_t parf, vm_offset_t dbi, vm_offset_t tlmm, unsigned probe)
+{
+	if ((probe >= 16 && probe <= 28)) { renoir_bhi_host(parf,tlmm); }
+	uint32_t saved_ltssm=rd(parf+0x1b0), saved_wlan_cfg=rd(tlmm+64*0x1000);
+	uint32_t saved_wlan_data=rd(tlmm+64*0x1000+4);
+	uint32_t saved_gen2=rd(dbi+0x80c), saved_ctl2=rd(dbi+0x90)&0xffff;
+	uint32_t saved_ctl=rd(dbi+0x80)&0xffff, saved_ack=rd(dbi+0x70c);
+	wr(tlmm+64*0x1000+4,0);
+	wr(tlmm+64*0x1000,0x3c3); /* GPIO, 16 mA, output, pull up */
+	sleep_us(5000);
+	wr(tlmm+64*0x1000+4,2);
+	sleep_us(11000); /* CNSS: >=10 ms before PERST release */
+	wr(dbi+0x80c,(saved_gen2&~0x1f00u)|0x100); /* x1 */
+	wr(dbi+0x90,(saved_ctl2&~15u)|1); /* initial Gen1 */
+	wr(dbi+0x80,saved_ctl&~3u); /* ASPM off during bring-up */
+	wr(dbi+0x70c,saved_ack|0x8000);
+	wr(tlmm+94*0x1000+4,2);
+	sleep_us(100000);
+	wr(parf+0x1b0,saved_ltssm|0x100);
+	__asm__ volatile("dsb sy" ::: "memory");
+	bool linked=false;
+	for (unsigned i=0; i<2000; i++) {
+		if ((rd(dbi+0xf28)&0x400) && (rd(dbi+0x80)&(1u<<29))) { linked=true; break; }
+		sleep_us(100);
+	}
+	uint32_t status=rd(dbi+0x80);
+	say("renoir-wifi: PCIe link %u: ELBI %#x link status %#x speed %u width %u LTSSM %#x\n",
+	    linked,rd(dbi+0xf28),status,(status>>16)&15,(status>>20)&63,rd(parf+0x1b0));
+	if (linked && (probe == 12 || probe == 13 || (probe >= 16 && probe <= 28))) { renoir_pcie_config_probe(dbi,probe); }
+	wr(tlmm+94*0x1000+4,0);
+	if ((probe >= 16 && probe <= 28)) { sleep_us(1000); renoir_bhi_cleanup(true); }
+	wr(parf+0x1b0,saved_ltssm);
+	wr(tlmm+64*0x1000+4,0);
+	sleep_us(5000);
+	wr(dbi+0x70c,saved_ack); wr(dbi+0x80,saved_ctl);
+	wr(dbi+0x90,saved_ctl2); wr(dbi+0x80c,saved_gen2);
+	wr(tlmm+64*0x1000+4,saved_wlan_data); wr(tlmm+64*0x1000,saved_wlan_cfg);
+	__asm__ volatile("dsb sy" ::: "memory");
+	return linked;
+}
+
+/* Probe 6/7 keeps the endpoint reset. Probe 11 also trains its link. */
+static bool
+renoir_pcie_phy_probe(vm_offset_t gcc, vm_offset_t tlmm, unsigned probe)
+{
+	vm_offset_t parf = ml_io_map(0x1c00000, 0x4000), phy = ml_io_map(0x1c06000, 0x4000);
+	if (!parf || !phy) { return false; }
+	static const uint32_t parf_offsets[] = { 0, 0x40, 0x174, 0x350, 0x358, 0x1000 };
+	static const uint32_t gcc_offsets[] = { 0x52000, 0x6b054, 0x6b058, 0x6b05c,
+	    0x6b060, 0x6b064, 0x6b068, 0x6b03c, 0x6b040, 0x6b000, 0x6c01c };
+	uint32_t saved_parf[6], saved_gcc[11];
+	for (unsigned i=0; i<6; i++) { saved_parf[i]=rd(parf+parf_offsets[i]); }
+	for (unsigned i=0; i<11; i++) { saved_gcc[i]=rd(gcc+gcc_offsets[i]); }
+	uint32_t saved_perst_cfg = rd(tlmm + 94*0x1000), saved_perst_data = rd(tlmm + 94*0x1000 + 4);
+	uint32_t saved_clkreq = rd(tlmm + 95*0x1000);
+	wr(tlmm + 94*0x1000 + 4, 0);
+	wr(tlmm + 94*0x1000, 0x201); /* GPIO output, pull down, 2 mA */
+	wr(tlmm + 95*0x1000, 7); /* pinctrl-shima: pcie0_clkreqn function 1, pull up */
+	say("renoir-wifi: PHY: root clocks, resets and PARF setup next; endpoint remains reset\n");
+	sleep_ms(3000);
+	wr(gcc + 0x52000, saved_gcc[0] | (1u<<22) | (1u<<12) | (1u<<11));
+	wr(gcc + 0x6b054, saved_gcc[1] & ~3u); /* external PIPE */
+	wr(gcc + 0x6b05c, 1); /* aux: XO / 1 = 19.2 MHz, no M/N mode */
+	wr(gcc + 0x6b060, 0); wr(gcc + 0x6b064, 0); wr(gcc + 0x6b068, 0);
+	wr(gcc + 0x6b058, rd(gcc + 0x6b058) | 1);
+	wr(gcc + 0x6b040, 0x605); /* PHY rchng: GPLL0 even / 3 = 100 MHz */
+	wr(gcc + 0x6b03c, rd(gcc + 0x6b03c) | 1);
+	__asm__ volatile("dsb sy" ::: "memory");
+	bool updated = false;
+	for (unsigned i=0; i<1000; i++) {
+		if (!((rd(gcc+0x6b058)|rd(gcc+0x6b03c))&1)) { updated=true; break; }
+		sleep_us(10);
+	}
+	bool ready = false;
+	if (!updated) { say("renoir-wifi: PHY: clock source update timeout\n"); goto cleanup; }
+	wr(gcc+0x6b000, saved_gcc[9] | 1); sleep_us(1000); wr(gcc+0x6b000, saved_gcc[9] & ~1u);
+	wr(gcc+0x6c01c, saved_gcc[10] | 1); sleep_us(1000); wr(gcc+0x6c01c, saved_gcc[10] & ~1u);
+	wr(parf+0x1000, 4); /* root complex */
+	wr(parf+0x40, rd(parf+0x40) & ~1u);
+	wr(parf+0x350, 0);
+	wr(parf, 0x365e);
+	wr(parf+0x174, rd(parf+0x174) | 16);
+	wr(parf+0x358, 0x4000000);
+	say("renoir-wifi: PHY: programming 73 writes from shima-pcie.dtsi next\n");
+	sleep_ms(3000);
+	for (unsigned i=0; i<sizeof(renoir_pcie0_phy_sequence)/sizeof(renoir_pcie0_phy_sequence[0]); i++) {
+		const struct renoir_phy_write *w=&renoir_pcie0_phy_sequence[i];
+		wr(phy+w->offset,w->value);
+		if (w->delay_us) { sleep_us(w->delay_us); }
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	sleep_us(1000);
+	wr(gcc+0x52008,rd(gcc+0x52008)|16); /* enable PIPE only after PHY setup */
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (unsigned i=0; i<1000; i++) {
+		if (!(rd(phy+0x214)&64)) { ready=true; break; }
+		sleep_us(100);
+	}
+	say("renoir-wifi: PHY: status %#x ready %u PIPE %#x\n",rd(phy+0x214),ready,rd(gcc+0x6b030));
+	if (ready && probe >= 7) {
+		say("renoir-wifi: PHY ready; root DBI read next (no endpoint BAR)\n");
+		sleep_ms(3000);
+		vm_offset_t dbi=ml_io_map(0x60000000,0x4000);
+		if (dbi) {
+			say("renoir-wifi: DBI root identity %#x command %#x\n",rd(dbi),rd(dbi+4));
+			if (((probe >= 11 && probe <= 13) || (probe >= 16 && probe <= 28)) && rd(dbi)==0x010f17cb) { renoir_pcie_link_probe(parf,dbi,tlmm,probe); }
+		}
+	}
+cleanup:
+	wr(phy+0x240,0); /* power down PHY before restoring clocks */
+	wr(gcc+0x52008,rd(gcc+0x52008)&~16u);
+	wr(gcc+0x6b054, (saved_gcc[1]&~3u)|2); /* XO before power collapse */
+	for (unsigned i=0; i<6; i++) { wr(parf+parf_offsets[i],saved_parf[i]); }
+	for (unsigned i=0; i<11; i++) { if(i!=2 && i!=7) { wr(gcc+gcc_offsets[i],saved_gcc[i]); } }
+	wr(gcc+0x6b058,rd(gcc+0x6b058)|1); wr(gcc+0x6b03c,rd(gcc+0x6b03c)|1);
+	wr(tlmm+94*0x1000+4,saved_perst_data); wr(tlmm+94*0x1000,saved_perst_cfg); wr(tlmm+95*0x1000,saved_clkreq);
+	__asm__ volatile("dsb sy" ::: "memory");
+	say("renoir-wifi: PHY probe ended; host registers restored\n");
+	return ready;
+}
+
+/* Read PM8350 / PM8350C buck control blocks through the arbiter observer.
+ * No PMIC writes: SMPS rails can have other consumers. Before voting on the
+ * WLAN supplies, record what the boot chain actually left enabled.
+ * Observer v5 layout matches redwood_buttons.c and OKX spmi-pmic-arb.c.
+ */
+static bool
+renoir_pmic_read(vm_offset_t observer, unsigned channel, unsigned reg,
+    uint8_t *bytes, unsigned count)
+{
+	if (!count || count > 8 || channel >= 512 || reg > 256 - count) { return false; }
+	vm_offset_t port = observer + channel * 0x80;
+	wr(port, (1u << 27) | (reg << 4) | (count - 1));
+	__asm__ volatile("dsb sy" ::: "memory");
+	uint32_t status = 0;
+	for (unsigned i = 0; i < 2000; i++) {
+		status = rd(port + 8);
+		if (status & 1) { break; }
+		sleep_us(1);
+	}
+	if ((status & 15) != 1) { return false; }
+	uint32_t data[2] = { rd(port + 0x18), count > 4 ? rd(port + 0x1c) : 0 };
+	for (unsigned i = 0; i < count; i++) { bytes[i] = data[i / 4] >> (8 * (i % 4)); }
+	return true;
+}
+
+static void
+renoir_wifi_rail_survey(void)
+{
+	vm_offset_t core = ml_io_map(0xc440000, 0x1100);
+	vm_offset_t observer = ml_io_map(0xe600000, 0x10000);
+	if (!core || !observer) { return; }
+	uint32_t version = rd(core), channels = rd(core + 4) & 0x7ff;
+	if (version < 0x50000000 || version >= 0x70000000) {
+		say("renoir-wifi: PMIC observer layout unsupported: %#x channels %u\n", version, channels);
+		return;
+	}
+	if (!channels || channels > 512) { channels = 512; }
+	say("renoir-wifi: PMIC arbiter version %#x, %u channels\n", version, channels);
+	unsigned found = 0, failed = 0;
+	bool seen[2][256] = { { false } };
+	for (unsigned channel = 0; channel < channels; channel++) {
+		uint32_t mapping = rd(core + 0x900 + 4 * channel);
+		unsigned id = (mapping >> 8) & 0xfff, sid = id >> 8, peripheral = id & 255;
+		if (!mapping || (sid != 1 && sid != 2) || peripheral < 0x14 || peripheral >= 0x40 ||
+		    seen[sid - 1][peripheral]) { continue; }
+		uint8_t kind[2], control[8], status;
+		if (!renoir_pmic_read(observer, channel, 4, kind, 2)) { failed++; continue; }
+		seen[sid - 1][peripheral] = true;
+		if (kind[0] != 3 && kind[0] != 0x1c && kind[0] != 0x22) { continue; }
+		if (!renoir_pmic_read(observer, channel, 0x40, control, 8) ||
+		    !renoir_pmic_read(observer, channel, 0x10, &status, 1)) {
+			say("renoir-wifi: PMIC SID%u peripheral %#x control read failed\n", sid, peripheral);
+			continue;
+		}
+		found++;
+		say("renoir-wifi: PMIC SID%u peripheral %#x type %#x subtype %#x status %#x control 40..47 %02x %02x %02x %02x %02x %02x %02x %02x\n",
+		    sid, peripheral, kind[0], kind[1], status, control[0], control[1], control[2], control[3],
+		    control[4], control[5], control[6], control[7]);
+	}
+	say("renoir-wifi: PMIC rail survey complete: %u control blocks, %u failed identity reads; no regulator votes or WLAN_EN changes\n", found, failed);
+}
+
+/* DT iommu-map: endpoint BDF 01:00.0 -> apps SMMU SID 0x2401.
+ * Read-only inventory before constructing a DMA address space. Never use
+ * redwood's 0x1c00/1 stream match or assume the boot chain configured ours.
+ */
+static void
+renoir_wifi_smmu_survey(void)
+{
+	need(&apps_smmu);
+	uint32_t scr0=rd(apps_smmu.base+SMMU_SCR0), idr0=rd(apps_smmu.base+SMMU_IDR0);
+	uint32_t idr1=rd(apps_smmu.base+SMMU_IDR1), matches=idr0&255;
+	bool wide=(scr0&8)!=0;
+	unsigned valid=0, covered=0, free_match=~0u;
+	say("renoir-wifi: apps SMMU scr0 %#x idr0 %#x idr1 %#x; endpoint SID 0x2401\n",scr0,idr0,idr1);
+	for (unsigned i=0; i<matches && SMMU_SMR(i)<0xc00; i++) {
+		uint32_t smr=rd(apps_smmu.base+SMMU_SMR(i)), s2cr=rd(apps_smmu.base+SMMU_S2CR(i));
+		bool active=wide ? (s2cr&0x400)!=0 : (smr&0x80000000)!=0;
+		if (!active) { if (free_match==~0u) { free_match=i; } continue; }
+		valid++;
+		uint32_t mask=(smr>>16)&(wide ? 65535 : 32767), sid=smr&(wide ? 65535 : 32767);
+		if (((sid^0x2401u)&~mask)==0) {
+			covered++;
+			say("renoir-wifi: apps SMMU matching entry %u smr %#x s2cr %#x type %u context %u\n",i,smr,s2cr,(s2cr>>16)&3,s2cr&255);
+		}
+	}
+	say("renoir-wifi: apps SMMU %u/%u entries active, %u cover SID 0x2401, first unused %u; no SMMU writes\n",
+	    valid,matches,covered,free_match);
+}
+
+/* Empty tables accept no DMA addresses. Test ownership and readback first,
+ * then restore all context configuration, including a failed setup.
+ */
+static void
+renoir_wifi_smmu_probe(void)
+{
+	if (!radio_space_find() || !radio_enter(RADIO_ADDRESSES,0,0)) {
+		say("renoir-wifi: SMMU probe has no unused context or empty tables\n");
+		return;
+	}
+	if (rd(apps_smmu_context.base+SMMU_CB_FSR)&SMMU_FSR_ALL) {
+		say("renoir-wifi: unused SMMU context has pending fault; left unchanged\n");
+		return;
+	}
+	static const uint32_t offsets[] = { 0,0x10,0x20,0x24,0x28,0x2c,0x30,0x38,0x3c };
+	uint32_t saved[9], cbar=rd(apps_smmu_second.base+SMMU_CBAR(radio_space.context));
+	uint32_t cba2r=rd(apps_smmu_second.base+SMMU_CBA2R(radio_space.context));
+	for (unsigned i=0; i<9; i++) { saved[i]=rd(apps_smmu_context.base+offsets[i]); }
+	bool accepted=radio_space_on_for(0x2401,0);
+	say("renoir-wifi: SMMU SID 0x2401 empty-table setup accepted %u; DMA remains disabled\n",accepted);
+	radio_space_off();
+	wr(apps_smmu.base+SMMU_SMR(radio_space.match),radio_space.old_smr);
+	wr(apps_smmu.base+SMMU_S2CR(radio_space.match),radio_space.old_s2cr);
+	wr(apps_smmu_context.base,0);
+	for (unsigned i=1; i<9; i++) { wr(apps_smmu_context.base+offsets[i],saved[i]); }
+	wr(apps_smmu_second.base+SMMU_CBAR(radio_space.context),cbar);
+	wr(apps_smmu_second.base+SMMU_CBA2R(radio_space.context),cba2r);
+	wr(apps_smmu_context.base,saved[0]);
+	__asm__ volatile("dsb sy" ::: "memory");
+	bool restored=rd(apps_smmu.base+SMMU_SMR(radio_space.match))==radio_space.old_smr &&
+	    rd(apps_smmu.base+SMMU_S2CR(radio_space.match))==radio_space.old_s2cr &&
+	    rd(apps_smmu_second.base+SMMU_CBAR(radio_space.context))==cbar &&
+	    rd(apps_smmu_second.base+SMMU_CBA2R(radio_space.context))==cba2r;
+	for (unsigned i=0; i<9; i++) {
+		if (rd(apps_smmu_context.base+offsets[i])!=saved[i]) { restored=false; }
+	}
+	say("renoir-wifi: SMMU context configuration restored %u\n",restored);
+}
+
+static void
+renoir_wifi_init(void)
+{
+	uint32_t probe = whole ? 27 : 0;
+	static const struct { const char *name; uint32_t offset; } clocks[] = {
+		{ "votes", 0x52008 }, { "core reset", 0x6b000 }, { "pcie0 gdsc", 0x6b004 },
+		{ "slv_q2a", 0x6b010 }, { "slv_axi", 0x6b014 },
+		{ "mstr_axi", 0x6b01c }, { "cfg_ahb", 0x6b024 },
+		{ "aux", 0x6b028 }, { "pipe", 0x6b030 },
+	};
+	static const uint32_t pins[] = { 64, 65, 94, 95, 96 };
+
+	say("renoir-wifi: WCN6855/QCA6490 PCIe 17cb:1103, MHI; WPSS path excluded\n");
+	PE_parse_boot_argn("wifi_probe", &probe, sizeof(probe));
+	bool link_probe = (probe >= 11 && probe <= 13) || (probe >= 16 && probe <= 28);
+	if (probe == 8) { renoir_wifi_rail_survey(); }
+	if (probe == 9) { renoir_wifi_vote_survey(); }
+	if (probe == 14) { renoir_wifi_smmu_survey(); }
+	if (probe == 15) { renoir_wifi_smmu_probe(); }
+	if (probe == 10) {
+		struct renoir_radio_votes votes;
+		bool powered=renoir_radio_power(&votes,true);
+		say("renoir-wifi: radio supply vote test: %s; WLAN_EN remains low\n",powered ? "passed" : "FAILED");
+		bool restored=renoir_radio_power(&votes,false);
+		say("renoir-wifi: radio supply votes restored: %u\n",restored);
+	}
+	if (probe) {
+		vm_offset_t gcc = ml_io_map(0x100000, 0x70000);
+		vm_offset_t tlmm = ml_io_map(0xf100000, 0x61000);
+		if (!gcc || !tlmm) {
+			say("renoir-wifi: cannot map GCC/TLMM for read-only survey\n");
+			return;
+		}
+		for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
+			say("renoir-wifi: GCC %s [%#x] = %#x\n", clocks[i].name,
+			    0x100000 + clocks[i].offset, *(volatile uint32_t *)(gcc + clocks[i].offset));
+		}
+		for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+			vm_offset_t gpio = tlmm + pins[i] * 0x1000;
+			say("renoir-wifi: GPIO%u cfg %#x in/out %#x\n", pins[i],
+			    *(volatile uint32_t *)gpio, *(volatile uint32_t *)(gpio + 4));
+		}
+		say("renoir-wifi: survey complete; PCIe, DMA, MHI and firmware not started\n");
+		struct renoir_radio_votes radio_votes;
+		if (link_probe && !renoir_radio_power(&radio_votes,true)) {
+			renoir_radio_power(&radio_votes,false);
+			say("renoir-wifi: link probe stopped: radio power votes failed\n");
+			return;
+		}
+		bool analog_first = false, analog_second = false;
+		if ((probe >= 5 && probe <= 7) || link_probe) {
+			say("renoir-wifi: probe 5: PCIe analog supplies only; no PHY, link or radio\n");
+			analog_first = renoir_pcie_ldo("ldob6", 1200, true);
+			analog_second = analog_first && renoir_pcie_ldo("ldoc10", 880, true);
+			sleep_ms(3000);
+		}
+		if ((probe >= 2 && probe <= 4) || ((probe == 6 || probe == 7 || link_probe) && analog_second)) {
+			uint32_t saved_votes = rd(gcc + 0x52008);
+			uint32_t saved_domain = rd(gcc + 0x6b004);
+			say("renoir-wifi: probe 2: next is GDSC enable only; no PCIe aperture accesses\n");
+			sleep_ms(3000);
+			wr(gcc + 0x6b004, saved_domain & ~1u);
+			__asm__ volatile("dsb sy" ::: "memory");
+			for (unsigned i = 0; i < 500 && !(rd(gcc + 0x6b004) & 0x80000000u); i++) { sleep_us(1); }
+			say("renoir-wifi: probe 2: GDSC after enable %#x; restore follows\n", rd(gcc + 0x6b004));
+			if (probe >= 3 && (rd(gcc + 0x6b004) & 0x80000000u)) {
+				say("renoir-wifi: probe 3: next is host bus clock votes, no radio/PHY/DBI\n");
+				sleep_ms(3000);
+				wr(gcc + 0x52008, saved_votes | 0x2fu);
+				__asm__ volatile("dsb sy" ::: "memory");
+				sleep_us(100);
+				uint32_t cfg = rd(gcc + 0x6b024);
+				say("renoir-wifi: probe 3: cfg %#x master %#x slave %#x aux %#x reset %#x\n",
+				    cfg, rd(gcc + 0x6b01c), rd(gcc + 0x6b014), rd(gcc + 0x6b028), rd(gcc + 0x6b000));
+				if (probe >= 6 && !(cfg & 0x80000000u) && !(rd(gcc + 0x6b000) & 1)) {
+					renoir_pcie_phy_probe(gcc, tlmm, probe);
+				}
+				if (probe == 4 && !(cfg & 0x80000000u) && !(rd(gcc + 0x6b000) & 1)) {
+					say("renoir-wifi: probe 4: next is PARF only; DBI is excluded\n");
+					sleep_ms(3000);
+					vm_offset_t parf = ml_io_map(0x1c00000, 0x4000);
+					if (parf) { say("renoir-wifi: probe 4: PARF sysctrl %#x LTSSM %#x\n", rd(parf), rd(parf + 0x1b0)); }
+				}
+			}
+			sleep_ms(3000);
+			wr(gcc + 0x52008, saved_votes);
+			wr(gcc + 0x6b004, saved_domain);
+			__asm__ volatile("dsb sy" ::: "memory");
+			say("renoir-wifi: probe 2: GDSC restored %#x\n", rd(gcc + 0x6b004));
+		}
+		if ((probe >= 5 && probe <= 7) || link_probe) {
+			if (analog_first) { renoir_pcie_ldo("ldoc10", 880, false); }
+			renoir_pcie_ldo("ldob6", 1200, false);
+		}
+		if (link_probe) {
+			say("renoir-wifi: radio supply votes restored after link probe: %u\n",renoir_radio_power(&radio_votes,false));
+		}
+	}
+	say("renoir-wifi: session ended; temporary PCIe, SMMU and power state restored\n");
+}
+
+static void renoir_wifi_begin(void);
+
 void
 redwood_wifi_init(void)
 {
@@ -4194,6 +4870,14 @@ redwood_wifi_init(void)
 	}
 	if (last_step == 0 && on != 1) {
 		printf("wifi: wifi=%u is not understood: wifi=1 turns the radio on, wifi_step=N goes the first N steps of that\n", on);
+		return;
+	}
+	if (redwood_board_is("renoir")) {
+		if (last_step==0) { renoir_wifi_begin(); } else { renoir_wifi_init(); }
+		return;
+	}
+	if (!redwood_board_is("redwood")) {
+		printf("wifi: disabled: WPSS memory/firmware setup is only verified on redwood\n");
 		return;
 	}
 	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
@@ -4313,3 +4997,42 @@ redwood_wifi_init(void)
  *     engines and the rings of the data path. Those can be looked at in turn as well, at the
  *     price of a thread that never sleeps while the link is up.
  */
+
+/* Hold the saved hardware state on this thread's stack throughout the session.
+ * The normal boot continues; stop releases it only after ath11k/MHI have stopped. */
+static void
+renoir_wifi_thread(__unused void *parameter,__unused wait_result_t result)
+{
+	renoir_wifi_init();renoir_session_running=false;
+	thread_terminate(current_thread());
+}
+
+static void
+renoir_wifi_begin(void)
+{
+	uint64_t length=0;uint8_t address[6];thread_t thread;uint32_t loud=0;
+	if (pe_arm_get_soc_base_phys()!=REDWOOD_SOC_BASE ||
+	    !image_file_in("fw-wifi-renoir","amss20.bin",&length) ||
+	    !image_file_in("fw-wifi-renoir","bd_k9gl.elf",&length) ||
+	    !image_file("network",&length) || !redwood_wifi_radio_address(address)) {
+		tell("renoir-wifi: missing phone hardware, firmware, network or station address; radio not started\n");return;
+	}
+	whole=true;quiet=!(PE_parse_boot_argn("wifi_loud",&loud,sizeof(loud)) && loud);
+	redwood_lx_net_early();
+	renoir_session_wanted=true;renoir_session_running=true;
+	if (kernel_thread_start(renoir_wifi_thread,NULL,&thread)!=KERN_SUCCESS) {
+		renoir_session_wanted=false;renoir_session_running=false;
+		tell("renoir-wifi: cannot create session thread\n");return;
+	}
+	thread_deallocate(thread);
+	tell("renoir-wifi: PCIe/MHI driver starting beside iOS\n");
+}
+
+static void
+renoir_wifi_stop(void)
+{
+	renoir_session_wanted=false;
+	for (unsigned ms=0;renoir_session_running && ms<40000;ms+=10) { sleep_ms(10); }
+	if (renoir_session_running) { tell("renoir-wifi: session did not finish before loader quiesce\n"); }
+	redwood_apple80211_summary();
+}

@@ -45,6 +45,7 @@
 #include "lx.h"
 
 static struct {
+	bool renoir;
 	unsigned how;				/* wifi_lx */
 	bool mission;				/* the firmware has been asked for mission mode, and for no other since */
 	bool closed;				/* the driver has stopped the bus: the registers are not touched again */
@@ -56,6 +57,39 @@ static struct {
 	volatile bool data;			/* ... and looks at the data path's rings as well */
 	unsigned same;				/* it has written a ring's pointer what it held so many times */
 } bus;
+
+/* The phone's Qualcomm QCA6490 firmware uses a different CE contract from
+ * laptop WCN6855 firmware. Keep a private copy: the Redwood tables are shared. */
+static struct ce_attr renoir_host_ce[9];
+static struct ce_pipe_config renoir_target_ce[9];
+static struct service_to_pipe renoir_services[15];
+
+static void
+renoir_ce_profile(struct ath11k_base *ab)
+{
+	memcpy(renoir_host_ce,ab->hw_params.host_ce_config,sizeof(renoir_host_ce));
+	memcpy(renoir_target_ce,ab->hw_params.target_ce_config,sizeof(renoir_target_ce));
+	/* OKX hif/src/ce/ce_assignment.h: host/target_ce_config_wlan_qca6490. */
+	renoir_host_ce[2].src_sz_max=3520;renoir_host_ce[2].dest_nentries=64;
+	renoir_host_ce[3].src_sz_max=3520;
+	renoir_host_ce[5].flags|=CE_ATTR_DIS_INTR;
+	renoir_host_ce[7].src_nentries=0;renoir_host_ce[7].src_sz_max=2048;
+	renoir_host_ce[7].flags|=CE_ATTR_DIS_INTR;
+	renoir_host_ce[7].send_cb=NULL;
+	renoir_target_ce[2].nbytes_max=__cpu_to_le32(3520);
+	renoir_target_ce[3].nbytes_max=__cpu_to_le32(3520);
+	ab->hw_params.host_ce_config=renoir_host_ce;
+	ab->hw_params.target_ce_config=renoir_target_ce;
+	memcpy(renoir_services,ab->hw_params.svc_to_ce_map,14*sizeof(*renoir_services));
+	renoir_services[14]=(struct service_to_pipe){__cpu_to_le32(ATH11K_HTC_SVC_ID_PKT_LOG),__cpu_to_le32(PIPEDIR_IN),__cpu_to_le32(5)};
+	ab->hw_params.svc_to_ce_map=renoir_services;ab->hw_params.svc_to_ce_map_len=15;
+	/* CNSS power-cycles after cold calibration. This backend starts normal
+	 * mode directly; wifi_cal=1 exercises calibration only for diagnostics. */
+	ab->hw_params.coldboot_cal_mm=lx_os_option("wifi_cal")!=0;
+	/* Android requests regdb_xiaomi.bin, which is absent; do not substitute
+	 * the unrelated generic regdb.bin shipped beside the firmware. */
+	ab->hw_params.supports_regdb=false;
+}
 
 /* ---- what the driver says ---------------------------------------------------------------------- */
 
@@ -134,9 +168,12 @@ ath11k_dbg_dump(struct ath11k_base *ab, enum ath11k_debug_mask mask, const char 
  * the firmware names are the chip's first 512K; the second 512K show its data path's
  * registers, the third its copy engines'.
  */
+static spinlock_t pci_window_lock;
+
 static u32
 window(struct ath11k_base *ab, u32 offset)
 {
+	if (bus.renoir) { return offset<ATH11K_PCI_WINDOW_START ? offset : ATH11K_PCI_WINDOW_START+(offset&ATH11K_PCI_WINDOW_RANGE_MASK); }
 	if (offset < ATH11K_PCI_WINDOW_START) {
 		return (offset);
 	}
@@ -161,6 +198,7 @@ refused(struct ath11k_base *ab, u32 offset)
 	bool known = offset < ATH11K_PCI_WINDOW_START || (offset ^ HAL_SEQ_WCSS_UMAC_OFFSET) < ATH11K_PCI_WINDOW_RANGE_MASK ||
 	    (offset ^ HAL_SEQ_WCSS_UMAC_CE0_SRC_REG(ab)) < ATH11K_PCI_WINDOW_RANGE_MASK;
 
+	if (bus.renoir) { known=!(offset&3) && offset<0x2000000 && lx_os_rproc_boot()==0; }
 	if (known && bus.mission && !bus.closed) {
 		return (false);
 	}
@@ -227,7 +265,15 @@ bus_read32(struct ath11k_base *ab, u32 offset)
 	}
 	bus.reads++;
 	if (bus.how >= 2 && ab->mem != NULL) {
-		value = ioread32((u8 *)ab->mem + window(ab, offset));
+		if (bus.renoir) {
+			spin_lock_bh(&pci_window_lock);
+			if (offset>=ATH11K_PCI_WINDOW_START) {
+				iowrite32(ATH11K_PCI_WINDOW_ENABLE_BIT|((offset>>19)&0x3f),(u8 *)ab->mem+ATH11K_PCI_WINDOW_REG_ADDRESS);
+				ioread32((u8 *)ab->mem+ATH11K_PCI_WINDOW_REG_ADDRESS);
+			}
+			value=ioread32((u8 *)ab->mem+window(ab,offset));
+			spin_unlock_bh(&pci_window_lock);
+		} else { value = ioread32((u8 *)ab->mem + window(ab, offset)); }
 	}
 	if (bus.said < SAID_FIRST) {
 		say_repeats();
@@ -252,7 +298,15 @@ bus_write32(struct ath11k_base *ab, u32 offset, u32 value)
 	}
 	if (bus.how >= 2 && ab->mem != NULL) {
 		__asm __volatile("dsb sy");	/* (what was written to a ring is in memory before the radio is told of it) */
-		iowrite32(value, (u8 *)ab->mem + window(ab, offset));
+		if (bus.renoir) {
+			spin_lock_bh(&pci_window_lock);
+			if (offset>=ATH11K_PCI_WINDOW_START) {
+				iowrite32(ATH11K_PCI_WINDOW_ENABLE_BIT|((offset>>19)&0x3f),(u8 *)ab->mem+ATH11K_PCI_WINDOW_REG_ADDRESS);
+				ioread32((u8 *)ab->mem+ATH11K_PCI_WINDOW_REG_ADDRESS);
+			}
+			iowrite32(value,(u8 *)ab->mem+window(ab,offset));
+			spin_unlock_bh(&pci_window_lock);
+		} else { iowrite32(value, (u8 *)ab->mem + window(ab, offset)); }
 	}
 }
 
@@ -320,6 +374,45 @@ bus_quiet(void)
  * core.c asks for the mode "off" and stops the bus after that (ath11k_core_stop()). So the
  * copy engines are let go of here, before the request leaves.
  */
+/* Qualcomm phone firmware needs the host IOVA range and build type, which
+ * the laptop-oriented ath11k HOST_CAP schema does not describe. */
+struct renoir_ddr_range { u64 start,size; };
+struct renoir_host_cap {
+	struct qmi_wlanfw_host_cap_req_msg_v01 base;
+	u8 ddr_valid;
+	struct renoir_ddr_range ddr[3];
+	u8 build_valid;
+	u32 build;
+	u8 features_valid;
+	u64 features;
+};
+static const struct qmi_elem_info renoir_ddr_ei[]={
+	{.data_type=QMI_UNSIGNED_8_BYTE,.elem_len=1,.elem_size=sizeof(u64),.array_type=NO_ARRAY,.offset=offsetof(struct renoir_ddr_range,start)},
+	{.data_type=QMI_UNSIGNED_8_BYTE,.elem_len=1,.elem_size=sizeof(u64),.array_type=NO_ARRAY,.offset=offsetof(struct renoir_ddr_range,size)},
+	{.data_type=QMI_EOTI}
+};
+static int
+renoir_qmi_host_cap(struct qmi_handle *qmi,struct sockaddr_qrtr *sq,struct qmi_txn *txn,
+    size_t largest,const struct qmi_elem_info *original,const void *structure)
+{
+	struct renoir_host_cap request={0};struct qmi_elem_info ei[72];unsigned count=0;
+	while (count<64 && original[count].data_type!=QMI_EOTI) { ei[count]=original[count];count++; }
+	if (count==64) { return -EINVAL; }
+	request.base=*(const struct qmi_wlanfw_host_cap_req_msg_v01 *)structure;
+	request.base.wake_msi_valid=1;request.base.wake_msi=13; /* polled MSI sink base data is 0 */
+	request.ddr_valid=1;request.ddr[0].start=0xa0000000;request.ddr[0].size=0x10000000;
+	request.build_valid=1;request.build=2; /* CNSS release / secondary host build */
+	request.features_valid=1;request.features=0; /* PCIe DRV suspend is not implemented */
+	ei[count++]=(struct qmi_elem_info){.data_type=QMI_OPT_FLAG,.elem_len=1,.elem_size=sizeof(u8),.array_type=NO_ARRAY,.tlv_type=0x1f,.offset=offsetof(struct renoir_host_cap,ddr_valid)};
+	ei[count++]=(struct qmi_elem_info){.data_type=QMI_STRUCT,.elem_len=3,.elem_size=sizeof(struct renoir_ddr_range),.array_type=STATIC_ARRAY,.tlv_type=0x1f,.offset=offsetof(struct renoir_host_cap,ddr),.ei_array=renoir_ddr_ei};
+	ei[count++]=(struct qmi_elem_info){.data_type=QMI_OPT_FLAG,.elem_len=1,.elem_size=sizeof(u8),.array_type=NO_ARRAY,.tlv_type=0x20,.offset=offsetof(struct renoir_host_cap,build_valid)};
+	ei[count++]=(struct qmi_elem_info){.data_type=QMI_SIGNED_4_BYTE_ENUM,.elem_len=1,.elem_size=sizeof(u32),.array_type=NO_ARRAY,.tlv_type=0x20,.offset=offsetof(struct renoir_host_cap,build)};
+	ei[count++]=(struct qmi_elem_info){.data_type=QMI_OPT_FLAG,.elem_len=1,.elem_size=sizeof(u8),.array_type=NO_ARRAY,.tlv_type=0x27,.offset=offsetof(struct renoir_host_cap,features_valid)};
+	ei[count++]=(struct qmi_elem_info){.data_type=QMI_UNSIGNED_8_BYTE,.elem_len=1,.elem_size=sizeof(u64),.array_type=NO_ARRAY,.tlv_type=0x27,.offset=offsetof(struct renoir_host_cap,features)};
+	ei[count]=(struct qmi_elem_info){.data_type=QMI_EOTI};
+	return qmi_send_request(qmi,sq,txn,QMI_WLANFW_HOST_CAP_REQ_V01,largest+80,ei,&request);
+}
+
 int
 lx_qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi_txn *txn, int msg_id, size_t largest,
     const struct qmi_elem_info *ei, const void *structure)
@@ -337,6 +430,7 @@ lx_qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi
 		bus.mission = mode == ATH11K_FIRMWARE_MODE_NORMAL;
 		lx_tell("lx: the firmware is asked for mode %u (0: mission, 4: off, 7: calibration)\n", mode);
 	}
+	if (bus.renoir && msg_id==QMI_WLANFW_HOST_CAP_REQ_V01) { return renoir_qmi_host_cap(qmi,sq,txn,largest,ei,structure); }
 	return (qmi_send_request(qmi, sq, txn, msg_id, largest, ei, structure));
 }
 
@@ -521,6 +615,8 @@ lx_start(void)
 	bool up;
 	int ret;
 
+	bus.renoir=lx_os_radio_model()==1;
+	spin_lock_init(&pci_window_lock);
 	bus.how = lx_os_option("wifi_lx");
 	if (lx_prepare() != 0) {
 		lx_tell("lx: no thread, or no memory the radio can be given\n");
@@ -543,14 +639,20 @@ lx_start(void)
 	device.kobj.name = "wifi";
 
 	/* ahb.c: ath11k_ahb_probe(), for this chip */
-	ab = ath11k_core_alloc(&device, 0, ATH11K_BUS_AHB);
+	ab = ath11k_core_alloc(&device, 0, bus.renoir ? ATH11K_BUS_PCI : ATH11K_BUS_AHB);
 	if (ab == NULL) {
 		return (ENOMEM);
 	}
 	ab->hif.ops = &bus_ops;
-	ab->hw_rev = ATH11K_HW_WCN6750_HW10;
+	ab->hw_rev = bus.renoir ? ATH11K_HW_WCN6855_HW20 : ATH11K_HW_WCN6750_HW10;
+	if (bus.renoir) {
+		ab->mem=lx_os_map_registers(0x60400000,0x200000);ab->mem_ce=ab->mem;ab->mem_len=0x200000;
+		if (!ab->mem) { return ENOMEM; }
+	}
 	ab->fw_mode = ATH11K_FIRMWARE_MODE_NORMAL;
-	if ((ret = ath11k_core_pre_init(ab)) != 0 || (ret = ath11k_hal_srng_init(ab)) != 0 || (ret = ath11k_ce_alloc_pipes(ab)) != 0) {
+	ret=ath11k_core_pre_init(ab);
+	if (bus.renoir && !ret) { ab->hw_params.internal_sleep_clock=lx_os_option("wifi_internal_clock")!=0;renoir_ce_profile(ab); }
+	if (ret != 0 || (ret = ath11k_hal_srng_init(ab)) != 0 || (ret = ath11k_ce_alloc_pipes(ab)) != 0) {
 		lx_tell("lx: the driver does not get as far as its exchange with the firmware: %d\n", ret);
 		return (-ret);
 	}
@@ -582,6 +684,7 @@ lx_start(void)
 	    &ab->dev_flags) ? "HAS GIVEN UP on the way and wound itself down" : "HAS NOT GOT THROUGH its exchange with the firmware",
 	    ab->dev_flags);
 	if (!up) {
+		bus_quiet();
 		lx_pause_ms(600);		/* (for core.c to have wound down: the mode "off") */
 		ath11k_qmi_deinit_service(ab);
 		return (test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags) ? ETIMEDOUT : EIO);

@@ -755,8 +755,8 @@ iounmap(void *address)
  * or the other way round. The first part of it is handed out for good, a stretch at a time
  * (rings); the rest is slots of one size, taken and given back (buffers).
  */
-#define POOL_SIZE	(44u << 20)
-#define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
+#define POOL_SIZE	((lx_os_radio_model()==1 ? 80u : 44u) << 20)
+#define POOL_RINGS	((lx_os_radio_model()==1 ? 32u : 12u) << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
 #define POOL_SLOT	4096u
 #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)
 
@@ -764,7 +764,7 @@ static struct {
 	uint8_t *memory;
 	unsigned long long address;		/* the radio's, of the first byte */
 	uint32_t rings_used;
-	uint32_t free_slots[POOL_SLOTS], free_count;
+	uint32_t free_slots[(48u<<20)/POOL_SLOT], free_count;
 } pool;
 
 int
@@ -796,15 +796,20 @@ linux_dma_alloc_coherent(struct device *dev, size_t size, dma_addr_t *dma_handle
 {
 	uint32_t at;
 
+	if (!size || size>POOL_RINGS) { return NULL; }
 	size = roundup2(size, 64);
 	lx_os_lock();
 	at = pool.rings_used;
+	if (lx_os_radio_model()==1) {
+		uint32_t alignment=64;while (alignment<size && alignment<(32u<<20)) { alignment<<=1; }
+		at=roundup2(at,alignment);
+	}
 	if (pool.memory == NULL || at + size > POOL_RINGS) {
 		lx_os_unlock();
 		printf("lx: no room for %zu more bytes of rings\n", size);
 		return (NULL);
 	}
-	pool.rings_used += size;
+	pool.rings_used = at+size;
 	lx_os_unlock();
 	bzero(pool.memory + at, size);
 	*dma_handle = pool.address + at;

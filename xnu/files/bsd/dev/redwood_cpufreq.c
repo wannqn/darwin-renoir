@@ -86,6 +86,11 @@ redwood_cpufreq_init(void)
 	if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	/* SM7350 uses the same three EPSS domains (renoir.dts). */
+	if (!redwood_board_is("redwood") && !redwood_board_is("renoir")) {
+		printf("cpufreq: disabled: unsupported physical board\n");
+		return;
+	}
 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
 		cores[domain_of(topology->cpus[i].phys_id)]++;
 	}

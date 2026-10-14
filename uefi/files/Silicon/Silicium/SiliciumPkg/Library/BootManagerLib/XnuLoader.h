@@ -24,6 +24,7 @@ typedef struct {
 
 // Raw GPT partition that receives the text log (read back from Android).
 #define XNU_LOG_PARTITION  L"logdump"
+#define XNU_LOG_TO_STORAGE  1
 
 #define XNU_MARKER_MAGIC  0x584E5521 // "XNU!"
 

@@ -290,7 +290,7 @@ redwood_battery_init(void)
 	uint32_t enabled = 0;
 	thread_t thread;
 
-	if (!PE_parse_boot_argn("battery", &enabled, sizeof(enabled)) || !enabled) {
+	if (!redwood_board_is("redwood") || !PE_parse_boot_argn("battery", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
 	if (kernel_thread_start(battery_thread, NULL, &thread) == KERN_SUCCESS) {

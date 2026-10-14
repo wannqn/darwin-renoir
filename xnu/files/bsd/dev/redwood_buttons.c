@@ -526,6 +526,16 @@ redwood_buttons_init(void)
 	if (!enabled) {
 		return;
 	}
+	if (!redwood_board_is("redwood") && !redwood_board_is("renoir")) {
+		printf("buttons: disabled: unsupported physical board\n");
+		return;
+	}
+	/* xiaomi-sm7350-common.dtsi: PMK8350 SID0 PON, PM8350 SID1 GPIO6.
+	 * The peripheral addresses, input layout and arbiter EE0 match redwood.
+	 * buttons_thread still checks the arbiter version and peripheral types. */
+	if (redwood_board_is("renoir")) {
+		pin.name = "GPIO6 of the PM8350";
+	}
 	PE_parse_boot_argn("buttons_steps", &steps, sizeof(steps));
 	if (steps == 0) {
 		return;

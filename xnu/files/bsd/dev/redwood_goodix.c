@@ -1403,6 +1403,10 @@ redwood_goodix_init(void)
 		return;
 	}
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
+	if (!redwood_board_is("redwood")) {
+		printf("goodix: disabled: GT9916 wiring is only verified on redwood\n");
+		return;
+	}
 	if (kernel_thread_start(goodix_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

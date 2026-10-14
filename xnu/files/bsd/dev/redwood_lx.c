@@ -210,6 +210,12 @@ lx_os_option(const char *name)
 	return redwood_wifi_option(name);
 }
 
+unsigned
+lx_os_radio_model(void)
+{
+	return redwood_board_is("renoir") ? 1 : 0;
+}
+
 int
 lx_os_firmware(const char *name, const void **data, unsigned long *size)
 {

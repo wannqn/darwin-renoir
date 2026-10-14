@@ -244,6 +244,10 @@ clean_dcache(uint64_t start, uint64_t end)
 static efi_block_io *
 find_log_partition(void)
 {
+#ifdef XNU_PHONE_RENOIR
+	/* Initial renoir bring-up keeps logs in RAM, available over USB. */
+	return NULL;
+#endif
 	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
 	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
 	static const char16 want[] = LOG_PARTITION;
@@ -454,6 +458,7 @@ struct platform {
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 };
 
+#ifndef XNU_PHONE_RENOIR
 static const struct platform platform_qemu_virt = {
 	.name = "qemu-virt", .io_base = 0x08000000, .io_size = 0x08000000,
 	.gic_dist = 0x08000000, .gic_redist = 0x080A0000, .uart = 0x09000000, .psci_hvc = 1,
@@ -465,6 +470,7 @@ static const struct platform platform_qemu_virt = {
 	 */
 	.timeout_scale = 20,
 };
+#endif
 
 static const struct platform platform_redwood = {
 	/* io_base must be non-zero: XNU treats a zero SoC base as "no SoC" and skips clock setup. */
@@ -472,6 +478,17 @@ static const struct platform platform_redwood = {
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 };
+
+#ifdef XNU_PHONE_RENOIR
+/* Mu-Silicium Resources/DTBs/renoir.dts: SM7350, GICv3, PSCI SMC,
+ * CPUs 0x000..0x700. Do not infer the board from its framebuffer address:
+ * renoir and redwood both use 0xE1000000. */
+static const struct platform platform_renoir = {
+	.name = "renoir", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000,
+	.cores = 8, .core_shift = 8,
+};
+#endif
 
 /* ------------------------------------------------------------------------ */
 
@@ -1652,8 +1669,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
 	dt_prop_str(&w, "platform-name", "t8015");
 	/* what iBoot takes from the factory configuration of a real phone; fixed size fields */
-	dt_prop_padded(&w, "serial-number", "RDW00POCOX5P", 32);
-	dt_prop_padded(&w, "mlb-serial-number", "RDW00POCOX5PMLB00", 32);
+	dt_prop_padded(&w, "serial-number", str_eq(plat->name, "renoir") ? "REN01RMI11L" : "RDW00POCOX5P", 32);
+	dt_prop_padded(&w, "mlb-serial-number", str_eq(plat->name, "renoir") ? "REN01RMI11LMLB00" : "RDW00POCOX5PMLB00", 32);
 	dt_prop_padded(&w, "model-number", "MQAC2", 32);
 	dt_prop_padded(&w, "region-info", "LL/A", 32);
 	dt_prop_padded(&w, "regulatory-model-number", "A1865", 32);
@@ -1661,6 +1678,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	dt_begin(&w, "chosen");
+	/* Physical board identity, separate from the iPhone identity used by iOS. */
+	dt_prop_str(&w, "darwin-board", plat->name);
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);
@@ -2167,6 +2186,8 @@ fb_command(char *cmd)
 			const char *var = cmd + 7;
 			if (str_eq(var, "product")) {
 				fb_reply("OKAY", "xnuloader");
+			} else if (str_eq(var, "board")) {
+				fb_reply("OKAY", PLAT->name);
 			} else if (str_eq(var, "version")) {
 				fb_reply("OKAY", "0.5");
 			} else if (str_eq(var, "max-download-size")) {
@@ -2382,6 +2403,7 @@ usb_command_loop(void)
  * is simply replaced). In QEMU the display is then exactly what iOS expects; on the real phone
  * the kernel's display driver scales that picture to the panel.
  */
+#ifndef XNU_PHONE_RENOIR
 #define PHONE_WIDTH     1125            /* the screen of the iPhone X, whose identity we carry */
 #define PHONE_HEIGHT    2436
 #define FW_CFG_BASE     0x09020000ULL   /* QEMU virt: data at +0, selector at +8, DMA address at +16 */
@@ -2410,7 +2432,7 @@ ramfb_phone_screen(void)
 		uint64_t addr;
 		uint32_t fourcc, flags, width, height, stride;
 	} __attribute__((packed)) cfg;
-	static struct {
+	static volatile struct {
 		uint32_t control, length;
 		uint64_t address;
 	} dma;
@@ -2444,7 +2466,15 @@ ramfb_phone_screen(void)
 	dma.control = be32(select << 16 | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
 	dma.length = be32(sizeof(cfg));
 	dma.address = __builtin_bswap64((uint64_t)(uintptr_t)&cfg);
+	__asm__ volatile ("dsb sy" ::: "memory");
 	*(volatile uint64_t *)(FW_CFG_BASE + 16) = __builtin_bswap64((uint64_t)(uintptr_t)&dma);
+	/* fw_cfg DMA may complete on QEMU's I/O thread after the MMIO write.
+	 * Until completion, the kernel must not keep the old GOP framebuffer while
+	 * QEMU switches to this new buffer. Bit 0 is an error; all bits clear is done. */
+	uint64_t started = READ_SYSREG(CNTVCT_EL0), timeout = READ_SYSREG(CNTFRQ_EL0);
+	while (dma.control != 0 && !(be32(dma.control) & 1) && READ_SYSREG(CNTVCT_EL0) - started < timeout) {
+		__asm__ volatile ("yield" ::: "memory");
+	}
 	if (dma.control != 0) {
 		print("ramfb: control %x after the request\n", (uint64_t)be32(dma.control));
 		return;
@@ -2454,6 +2484,7 @@ ramfb_phone_screen(void)
 	SCREEN.height = PHONE_HEIGHT;
 	SCREEN.stride = PHONE_WIDTH * 4;
 }
+#endif
 
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)
@@ -2470,7 +2501,11 @@ efi_main(efi_handle image, efi_system_table *st)
 	print("CurrentEL=%x MIDR=%x MMFR0=%x CNTFRQ=%d image=%x\n", READ_SYSREG(CurrentEL) >> 2, READ_SYSREG(MIDR_EL1),
 	    READ_SYSREG(ID_AA64MMFR0_EL1), READ_SYSREG(CNTFRQ_EL0), (uint64_t)(uintptr_t)&__ImageBase);
 
+#ifdef XNU_PHONE_RENOIR
+	PLAT = &platform_renoir;
+#else
 	PLAT = &platform_qemu_virt;
+#endif
 	if (EFI_ERROR(BS->locate_protocol(&gop_guid, NULL, (void **)&GOP)) || GOP->mode == NULL ||
 	    GOP->mode->info == NULL || GOP->mode->fb_base == 0) {
 		GOP = NULL;                     /* no display (QEMU without -device ramfb) */
@@ -2479,11 +2514,13 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.width = GOP->mode->info->width;
 		SCREEN.height = GOP->mode->info->height;
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
+#ifndef XNU_PHONE_RENOIR
 		if (SCREEN.base == 0xE1000000ULL) {
 			PLAT = &platform_redwood;
 		} else {
 			ramfb_phone_screen();
 		}
+#endif
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
