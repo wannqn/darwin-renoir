@@ -302,12 +302,12 @@ get(struct apple80211req *request)
 		/*
 		 * What the card can do, a bit each (apple80211_var.h: APPLE80211_CAP_*): the 13 bytes are the
 		 * bits alone, from the first (the framework hands in a buffer that begins after the old
-		 * header's version word). AES, AES-CCM, power management, short slot and preamble, WPA2, WME,
+		 * header's version word). TKIP/group MIC, AES, AES-CCM, power management, short slot and preamble, WPA2, WME,
 		 * short guard interval at 20 MHz. Read wrong, the framework sees no WPA2 and builds no join
 		 * for a WPA2 network ("Unable to join").
 		 */
 		uint8_t bits[13] = { 0 };
-		static const uint8_t has[] = { 2, 3, 6, 9, 10, 14, 17, 19 };
+		static const uint8_t has[] = { 1, 2, 3, 6, 9, 10, 12, 14, 17, 19 };
 
 		for (unsigned i = 0; i < sizeof(has); i++) {
 			bits[has[i] / 8] |= (uint8_t)(1u << (has[i] % 8));
@@ -619,7 +619,7 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
 {
 	static unsigned said;
 
-	if (said < 200) {
+	if (said < 200 || event != REDWOOD_STA_SCAN_DONE) {
 		said++;
 		printf("apple80211: the station says: %s, %d\n", event == REDWOOD_STA_POWER ? "power" : event == REDWOOD_STA_SCAN_DONE ?
 		    "a scan is over" : event == REDWOOD_STA_JOIN_DONE ? "a join is over" : "the link", status);
@@ -726,7 +726,7 @@ redwood_apple80211_ioctl(u_long command, void *data)
 	error = is_set ? set(request, what, sizeof(what)) : get(request);
 	note(request, is_set, error);
 	/* (a request that is repeated for ever is said a few hundred times) */
-	if (said < 800) {
+	if (said < 800 || (is_set && request->req_type != 10)) {
 		said++;
 		printf("apple80211: %s %s %d (%s), value %d, %u bytes%s: %s", who, is_set ? "sets" : "gets", request->req_type,
 		    type_name(request->req_type), request->req_val, request->req_len, what, error == 0 ? "answered\n" : error ==

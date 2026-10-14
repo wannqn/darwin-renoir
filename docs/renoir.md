@@ -613,3 +613,25 @@ com.redwood.netverify штатно завершилось exit(0) и больш�
 Keychain и MobileWiFi тесты также прошли на этом ядре. Телефон оставлен в iOS
 с loader_return_after=0. Переключение и ручной join из Settings проверяются
 отдельно после завершения автоматических заданий.
+
+
+## Settings и TKIP group key
+
+После успешных консольных тестов пользователь воспроизвёл Unable to join
+через Settings. В `logs/phone-settings-failure-final.log` сводка показывает
+только один ASSOCIATE за запуск — намеренно неверный пароль консольного
+теста; попытка Settings не дошла до station worker.
+
+В CARD_CAPABILITIES отсутствовали TKIP (бит 1) и TKIPMIC (бит 12), хотя
+драйвер уже устанавливает TKIP GTK. Добавлены оба флага, сохранены CCMP/WPA2;
+WEP/WPA1 не объявляются. Значения ABI сверены с
+[apple80211_var.h OpenIntelWireless](https://github.com/OpenIntelWireless/itlwm/blob/master/include/Airport/apple80211_var.h).
+Это ещё не подтверждение работы UI: финальный ручной join проверяется отдельно.
+Неподдерживаемый TKIP pairwise не добавлен — рабочий профиль требует CCMP
+pairwise, в том числе когда group cipher TKIP.
+
+`tools/test_apple80211_capabilities.py` исполняет настоящий ответ case 12:
+проверяет 13-байтовый ABI, TKIP/MIC и CCMP/WPA2 без WEP/WPA1. Тест ключей,
+сборка XNU и QEMU SMP4 smoke также прошли. Команды изменения соединения и
+события power/join/link теперь сохраняются в логе после исчерпания стартового
+лимита, чтобы поздние попытки из Settings оставались видны; ключи не печатаются.
