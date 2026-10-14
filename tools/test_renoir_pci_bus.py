@@ -28,6 +28,9 @@ code=r'''
 #include <string.h>
 #include <stdio.h>
 typedef uint8_t u8;typedef uint32_t u32;typedef unsigned spinlock_t;struct ath11k_base {void *mem;};
+struct mutex { unsigned unused; };
+#define CE_COUNT_MAX 12
+#define ATH11K_EXT_IRQ_GRP_NUM_MAX 16
 #define ATH11K_PCI_WINDOW_START 0x80000
 #define ATH11K_PCI_WINDOW_RANGE_MASK 0x7ffff
 #define ATH11K_PCI_WINDOW_ENABLE_BIT 0x40000000

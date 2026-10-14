@@ -9,6 +9,7 @@ src=(root/'xnu/files/bsd/dev/renoir_mhi_boot.h').read_text()
 src=src.replace('__asm__ volatile("dsb sy" ::: "memory");','(void)0;')
 src=src.replace('__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");','(void)line;')
 code=r'''
+#define RADIO_PTE 3ull
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -269,7 +270,8 @@ static bool radio_space_find(void) {
  radio_space.match=3;radio_space.context=3;radio_space.old_smr=g[SMMU_SMR(3)/4];radio_space.old_s2cr=g[SMMU_S2CR(3)/4];
  return true;
 }
-static bool radio_enter(uint64_t a,uint64_t p,uint64_t n) {
+static bool radio_enter(uint64_t a,uint64_t p,uint64_t n,uint64_t attributes) {
+ (void)attributes;
  assert(a==RADIO_ADDRESSES && p==0x98000000 && n==allocation);mapped=true;return true;
 }
 static bool radio_space_on_for(uint32_t sid,uint32_t mask) {

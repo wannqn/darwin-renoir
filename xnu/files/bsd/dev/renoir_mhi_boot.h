@@ -114,7 +114,7 @@ renoir_bhi_prepare(const uint8_t *firmware, uint32_t size, bool full)
 		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
-	if (!radio_enter(RADIO_ADDRESSES,physical,renoir_bhi.allocation)) { return false; }
+	if (!radio_enter(RADIO_ADDRESSES,physical,renoir_bhi.allocation,RADIO_PTE)) { return false; }
 	for (unsigned i=0; i<9; i++) { renoir_bhi.context[i]=rd(apps_smmu_context.base+renoir_bhi_cb_offsets[i]); }
 	renoir_bhi.cbar=rd(apps_smmu_second.base+SMMU_CBAR(radio_space.context));
 	renoir_bhi.cba2r=rd(apps_smmu_second.base+SMMU_CBA2R(radio_space.context));

@@ -89,6 +89,7 @@ struct lx_radio {
 	unsigned heard_count, heard_lost;
 	struct lx_heard heard[HEARD_MOST];
 	uint8_t want[32], want_length;		/* the name of the network that is wanted ... */
+	unsigned width;				/* MHz of the channel joined: 20, or with wifi_wide=1 what the access point offers */
 	struct lx_target target;		/* ... and the best of it */
 
 	/* the network joined */
@@ -106,6 +107,17 @@ struct lx_radio {
 	volatile int handshake;			/* the last thing lx_wpa_message() said */
 	const char *handshake_why;
 	struct work_struct group_work;		/* a new group key, later on */
+	/* block ack: the access point's requests to send us frames in aggregates, by traffic class (TID) */
+	struct work_struct ba_work;
+	volatile uint8_t ba_asked;		/* TIDs with a request (ADDBA or DELBA) not yet dealt with */
+	struct {
+		bool start;			/* ADDBA (else DELBA) */
+		bool active;			/* the driver takes aggregates of it */
+		bool amsdu;
+		uint8_t token;
+		uint16_t ssn, size, timeout;
+	} ba[8];
+	unsigned ba_sessions, ba_refused;
 	struct ieee80211_key_conf *pairwise_key, *group_key;
 	unsigned group_cipher;
 	volatile bool joined;			/* keys set: frames pass */
@@ -836,6 +848,30 @@ management_received(struct lx_radio *radio, const uint8_t *f, unsigned length)
 		radio->answer_length = length - 30 < ELEMENTS_MOST ? length - 30 : ELEMENTS_MOST;
 		memcpy(radio->answer_elements, f + 30, radio->answer_length);
 		lx_os_unlock();
+	} else if (f[0] == 0xd0 && length >= 28 && f[24] == 3 && radio->reached >= IEEE80211_STA_ASSOC && lx_os_option("wifi_ba")) {
+		/* an action frame, block ack's: ADDBA request (0) or DELBA (2); done on the driver's terms in ba_handle() */
+		unsigned tid;
+
+		lx_os_lock();
+		if (f[25] == 0 && length >= 33) {
+			unsigned params = f[27] | f[28] << 8;
+
+			tid = params >> 2 & 7;
+			radio->ba[tid].start = true;
+			radio->ba[tid].amsdu = params & 1;
+			radio->ba[tid].size = (uint16_t)(params >> 6);
+			radio->ba[tid].token = f[26];
+			radio->ba[tid].timeout = (uint16_t)(f[29] | f[30] << 8);
+			radio->ba[tid].ssn = (uint16_t)((f[31] | f[32] << 8) >> 4);
+			radio->ba_asked |= (uint8_t)(1u << tid);
+		} else if (f[25] == 2) {
+			tid = (f[26] | f[27] << 8) >> 12 & 7;
+			radio->ba[tid].start = false;
+			radio->ba_asked |= (uint8_t)(1u << tid);
+		}
+		lx_os_unlock();
+		queue_work(radio->work, &radio->ba_work);
+		return;
 	} else if (f[0] == 0xc0 || f[0] == 0xa0) {	/* the access point shows us the door: with a reason */
 		status = f[24] | f[25] << 8;
 		answer = ANSWER_GONE;
@@ -1052,6 +1088,81 @@ lx_station_scan(void)
 	return (error);
 }
 
+/* ---- the station: block ack -------------------------------------------------------------------------- */
+
+/*
+ * The access point's requests to send us frames in aggregates (A-MPDU) for a traffic class, and to
+ * stop doing so, as mac80211 handles them (net/mac80211/agg-rx.c): the driver told (its
+ * ampdu_action, which sets up the firmware's reorder queue for the class), then the answer, ADDBA
+ * response, with the window size the driver can take. Without this every frame goes on its own
+ * and the link carries about a third of what it could. On the driver's work queue: the driver's
+ * call sends WMI commands, which the thread that brought the request must be free to see answered.
+ */
+static void
+ba_handle(struct work_struct *work)
+{
+	struct lx_radio *radio = __containerof(work, struct lx_radio, ba_work);
+	struct ieee80211_hw *hw = &radio->hw;
+
+	for (unsigned tid = 0; tid < 8; tid++) {
+		struct ieee80211_ampdu_params params = { .sta = radio->sta, .tid = (uint8_t)tid };
+		struct sk_buff *skb;
+		uint8_t *frame;
+		bool asked;
+		int ret = 0;
+
+		lx_os_lock();
+		asked = (radio->ba_asked & 1u << tid) != 0;
+		radio->ba_asked &= (uint8_t)~(1u << tid);
+		params.ssn = radio->ba[tid].ssn;
+		params.timeout = radio->ba[tid].timeout;
+		params.amsdu = radio->ba[tid].amsdu;
+		params.buf_size = radio->ba[tid].size == 0 || radio->ba[tid].size > hw->max_rx_aggregation_subframes ?
+		    hw->max_rx_aggregation_subframes : radio->ba[tid].size;
+		lx_os_unlock();
+		if (!asked || radio->sta == NULL || radio->reached < IEEE80211_STA_ASSOC) {
+			continue;
+		}
+		mutex_lock(&hw->wiphy->mtx);
+		if (radio->ba[tid].active) {			/* a new request for a class that has one: the old one goes first */
+			params.action = IEEE80211_AMPDU_RX_STOP;
+			radio->ops->ampdu_action(hw, radio->vif, &params);
+			radio->ba[tid].active = false;
+		}
+		if (radio->ba[tid].start) {
+			params.action = IEEE80211_AMPDU_RX_START;
+			ret = radio->ops->ampdu_action(hw, radio->vif, &params);
+			radio->ba[tid].active = ret == 0;
+		}
+		mutex_unlock(&hw->wiphy->mtx);
+		if (!radio->ba[tid].start) {
+			continue;
+		}
+		radio->ba_sessions += ret == 0;
+		radio->ba_refused += ret != 0;
+		lx_tell("lx: BLOCK ACK for traffic class %u: the access point asks to send aggregates of up to %u frames; the driver "
+		    "takes %u: %d\n", tid, radio->ba[tid].size, params.buf_size, ret);
+		if ((skb = frame_new(radio, 24 + 9, &frame)) == NULL) {
+			continue;
+		}
+		frame = management(radio, frame, 0xd0);
+		frame[0] = 3;				/* block ack */
+		frame[1] = 1;				/* ADDBA response */
+		frame[2] = radio->ba[tid].token;
+		frame[3] = ret == 0 ? 0 : 37;		/* success, or "the request has been declined" */
+		frame[4] = 0;
+		{
+			unsigned answer = (params.amsdu ? 1u : 0u) | 2u | tid << 2 | (unsigned)params.buf_size << 6;
+
+			frame[5] = (uint8_t)answer;
+			frame[6] = (uint8_t)(answer >> 8);
+		}
+		frame[7] = (uint8_t)params.timeout;
+		frame[8] = (uint8_t)(params.timeout >> 8);
+		frame_send(radio, skb);
+	}
+}
+
 /* ---- the station: joining a network -------------------------------------------------------------------- */
 
 /* Wait for the access point's answer to a management frame: one of the ANSWER_s, or ANSWER_NONE when the time is up. */
@@ -1110,15 +1221,17 @@ station_abilities(struct lx_radio *radio, const uint8_t *elements, unsigned leng
 	sta->deflink.supp_rates[band->band] = rates;
 	conf->basic_rates = basic;
 	sta->wme = conf->qos = vendor_element(elements, length, wmm) != NULL;
-	sta->deflink.bandwidth = IEEE80211_STA_RX_BW_20;
+	sta->deflink.bandwidth = radio->width == 80 ? IEEE80211_STA_RX_BW_80 : radio->width == 40 ? IEEE80211_STA_RX_BW_40 :
+	    IEEE80211_STA_RX_BW_20;
 	sta->deflink.rx_nss = 1;
 	sta->deflink.smps_mode = IEEE80211_SMPS_OFF;
 	if ((e = element(elements, length, 45)) != NULL && e[1] >= 26 && band->ht_cap.ht_supported) {	/* HT capabilities */
 		struct ieee80211_sta_ht_cap *ht = &sta->deflink.ht_cap;
 
 		ht->ht_supported = true;
-		/* (without the bits for 40 MHz: the channel asked for is 20 MHz wide) */
-		ht->cap = (uint16_t)((e[2] | e[3] << 8) & ~(IEEE80211_HT_CAP_SUP_WIDTH_20_40 | IEEE80211_HT_CAP_SGI_40));
+		/* (without the bits for 40 MHz where the channel is 20 MHz wide) */
+		ht->cap = (uint16_t)((e[2] | e[3] << 8) & (radio->width > 20 ? 0xffff : ~(IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
+		    IEEE80211_HT_CAP_SGI_40)));
 		ht->ampdu_factor = e[4] & 3;
 		ht->ampdu_density = e[4] >> 2 & 7;
 		memcpy(&ht->mcs, e + 5, sizeof(ht->mcs));
@@ -1184,7 +1297,8 @@ request_elements(struct lx_radio *radio, uint8_t *out, unsigned group_cipher)
 	memcpy(at, radio->rsn, 22);
 	at += 22;
 	if (element(target->elements, target->elements_length, 45) != NULL && band->ht_cap.ht_supported) {
-		uint16_t cap = (uint16_t)(band->ht_cap.cap & ~(IEEE80211_HT_CAP_SUP_WIDTH_20_40 | IEEE80211_HT_CAP_SGI_40));
+		uint16_t cap = (uint16_t)(band->ht_cap.cap & (radio->width > 20 ? 0xffff : ~(IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
+		    IEEE80211_HT_CAP_SGI_40)));
 
 		*at++ = 45;
 		*at++ = 26;
@@ -1369,6 +1483,9 @@ station_leave(struct lx_radio *radio)
 		}
 	}
 	cancel_work_sync(&radio->group_work);
+	cancel_work_sync(&radio->ba_work);
+	radio->ba_asked = 0;
+	bzero(radio->ba, sizeof(radio->ba));		/* (the driver forgets the classes' queues with the station) */
 	key_drop(radio, &radio->group_key, false);
 	key_drop(radio, &radio->pairwise_key, true);
 	explicit_bzero(&radio->wpa, sizeof(radio->wpa));
@@ -1396,6 +1513,59 @@ station_leave(struct lx_radio *radio)
 	kfree(radio->sta_memory);
 	radio->sta_memory = radio->sta = NULL;
 	radio->reached = IEEE80211_STA_NOTEXIST;
+}
+
+/*
+ * How wide the channel is to be: with wifi_wide=1 as wide as the access point says it works (its
+ * HT operation element: the second 20 MHz above or below; its VHT operation element: 80 MHz around
+ * a centre) and as the radio may tune (every 20 MHz of it allowed here); else 20 MHz. 80 MHz
+ * only at 5 GHz. mac80211 does this in ieee80211_determine_chan_mode().
+ */
+static void
+station_width(struct lx_radio *radio, struct linuxkpi_ieee80211_channel *primary, struct cfg80211_chan_def *def)
+{
+	const struct lx_target *target = &radio->target;
+	struct ieee80211_supported_band *band = radio->wiphy->bands[primary->band];
+	const uint8_t *ht = element(target->elements, target->elements_length, 61);
+	const uint8_t *vht = element(target->elements, target->elements_length, 192);
+	unsigned offset;
+
+	def->chan = primary;
+	def->width = NL80211_CHAN_WIDTH_20;
+	def->center_freq1 = primary->center_freq;
+	radio->width = 20;
+	if (!lx_os_option("wifi_wide") || ht == NULL || ht[1] < 22 || !band->ht_cap.ht_supported ||
+	    !(band->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40) || !(ht[3] & 4)) {
+		return;
+	}
+	if (vht != NULL && vht[1] >= 3 && vht[2] == 1 && primary->band == NL80211_BAND_5GHZ && band->vht_cap.vht_supported) {
+		unsigned center = 5000 + 5 * vht[3];
+		bool all = true;
+
+		for (unsigned frequency = center - 30; frequency <= center + 30; frequency += 20) {
+			struct linuxkpi_ieee80211_channel *c = linuxkpi_ieee80211_get_channel(radio->wiphy, frequency);
+
+			all &= c != NULL && !(c->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_80MHZ));
+		}
+		if (all && primary->center_freq >= center - 30 && primary->center_freq <= center + 30) {
+			def->width = NL80211_CHAN_WIDTH_80;
+			def->center_freq1 = center;
+			radio->width = 80;
+			return;
+		}
+	}
+	offset = ht[3] & 3;		/* the second 20 MHz: 1 above, 3 below, 0 none */
+	if (offset == 1 || offset == 3) {
+		struct linuxkpi_ieee80211_channel *second = linuxkpi_ieee80211_get_channel(radio->wiphy, offset == 1 ?
+		    primary->center_freq + 20 : primary->center_freq - 20);
+
+		if (second != NULL && !(second->flags & IEEE80211_CHAN_DISABLED) && !(primary->flags & (offset == 1 ?
+		    IEEE80211_CHAN_NO_HT40PLUS : IEEE80211_CHAN_NO_HT40MINUS))) {
+			def->width = NL80211_CHAN_WIDTH_40;
+			def->center_freq1 = offset == 1 ? primary->center_freq + 10 : primary->center_freq - 10;
+			radio->width = 40;
+		}
+	}
 }
 
 /*
@@ -1436,6 +1606,9 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 		lx_tell("lx: the network joined before is left\n");
 	}
 	INIT_WORK(&radio->group_work, group_rekey);
+	INIT_WORK(&radio->ba_work, ba_handle);
+	radio->ba_asked = 0;
+	bzero(radio->ba, sizeof(radio->ba));
 	memcpy(radio->want, name, name_length);
 	radio->want_length = (uint8_t)name_length;
 	bzero(target, sizeof(*target));
@@ -1521,9 +1694,7 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 		error = ENOMEM;
 		goto out;
 	}
-	radio->channel->def.chan = channel;
-	radio->channel->def.width = NL80211_CHAN_WIDTH_20;
-	radio->channel->def.center_freq1 = channel->center_freq;
+	station_width(radio, channel, &radio->channel->def);
 	radio->channel->min_def = radio->channel->def;
 	radio->channel->rx_chains_static = radio->channel->rx_chains_dynamic = 2;
 	vif->bss_conf.chanreq.oper = radio->channel->def;
@@ -1534,7 +1705,7 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 		ret = radio->ops->assign_vif_chanctx(hw, vif, &vif->bss_conf, radio->channel);
 	}
 	mutex_unlock(&hw->wiphy->mtx);
-	printf("lx: the channel is taken: %d\n", ret);
+	lx_tell("lx: the channel is taken, %u MHz wide around %u MHz: %d\n", radio->width, radio->channel->def.center_freq1, ret);
 	if (ret != 0) {
 		error = -ret;
 		goto out;
@@ -1709,9 +1880,10 @@ lx_station_say(void)
 
 	if (radio != NULL) {
 		lx_tell("lx: the network is %s, %llu s after it was joined: %u frames sent (%u could not be), %u received for us and "
-		    "%u sent to everybody; %u messages of the handshake, the group's key changed %u times\n", radio->joined ? "joined" :
-		    "NOT joined", radio->joined_at != 0 ? (lx_os_nanoseconds() - radio->joined_at) / 1000000000ull : 0, radio->sent,
-		    radio->sent_lost, radio->received, radio->received_group, radio->eapol, radio->rekeys);
+		    "%u sent to everybody; %u messages of the handshake, the group's key changed %u times; block ack: %u classes "
+		    "taken, %u refused\n", radio->joined ? "joined" : "NOT joined", radio->joined_at != 0 ? (lx_os_nanoseconds() -
+		    radio->joined_at) / 1000000000ull : 0, radio->sent, radio->sent_lost, radio->received, radio->received_group,
+		    radio->eapol, radio->rekeys, radio->ba_sessions, radio->ba_refused);
 	}
 }
 

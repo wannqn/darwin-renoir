@@ -12,6 +12,7 @@ b=src.index('/*\n * For the driver (redwood_lx.c): memory',a)
 c=src.index('static void\nrenoir_wifi_smmu_probe(')
 e=src.index('static void\nrenoir_wifi_init(void)',c)
 code=r'''
+#define RADIO_PTE 3ull
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -31,7 +32,8 @@ static bool radio_space_find(void) {
  radio_space.match=1;radio_space.context=2;radio_space.old_smr=g[0x804/4];
  radio_space.old_s2cr=g[0xc04/4];radio_space.old_sctlr=cb[0];return true;
 }
-static bool radio_enter(uint64_t a,uint64_t p,uint64_t n) { (void)a;(void)p;(void)n;return true; }
+static bool radio_enter(uint64_t a,uint64_t p,uint64_t n,uint64_t attributes) {
+ (void)attributes; (void)a;(void)p;(void)n;return true; }
 static uint32_t rd(vm_offset_t a) { return *(uint32_t *)a; }
 static void wr(vm_offset_t a,uint32_t v) {
  writes++;
