@@ -10,13 +10,28 @@
 cd "$(dirname "$0")"
 T=${1:-20}; shift
 EFI=${QEMU_EFI:-/usr/share/edk2/aarch64/QEMU_EFI.fd}
+QEMU_BIN=${QEMU_BIN:-qemu-system-aarch64}
+QEMU_LOCAL=$(readlink -f ../build-tools/qemu/usr)
+QEMU_DATA=()
+if ! command -v "$QEMU_BIN" >/dev/null && [ -x "$QEMU_LOCAL/bin/qemu-system-aarch64" ]; then
+  QEMU_BIN=$QEMU_LOCAL/bin/qemu-system-aarch64
+  export LD_LIBRARY_PATH="$QEMU_LOCAL/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export QEMU_MODULE_DIR="$QEMU_LOCAL/lib/qemu"
+  QEMU_DATA=(-L "$QEMU_LOCAL/share/qemu")
+  EFI=${QEMU_EFI:-$QEMU_LOCAL/share/edk2/aarch64/QEMU_EFI.fd}
+  QEMU_VARS=${QEMU_VARS:-$QEMU_LOCAL/share/edk2/aarch64/QEMU_VARS.fd}
+fi
 [ -f "$EFI" ] || { echo "run.sh: no UEFI firmware at $EFI (set QEMU_EFI and QEMU_VARS)"; exit 1; }
 cp "${QEMU_VARS:-/usr/share/edk2/aarch64/QEMU_VARS.fd}" vars.fd 2>/dev/null
 # the loader is the boot application of the little FAT volume QEMU makes of esp/:
 # the one built here, or else the one that comes with the repository
-L=../xnuloader/loader.efi; [ -f $L ] || L=../prebuilt/loader.efi
+L=${QEMU_LOADER:-../xnuloader/loader.efi}
+if [ -n "$QEMU_LOADER" ] && [ ! -f "$L" ]; then
+  echo "run.sh: requested QEMU_LOADER=$L is missing" >&2; exit 1
+fi
+[ -f "$L" ] || L=../prebuilt/loader.efi
 mkdir -p esp/EFI/BOOT && cp -u $L esp/EFI/BOOT/BOOTAA64.EFI
-timeout "$T" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
+timeout "$T" "$QEMU_BIN" "${QEMU_DATA[@]}" -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
   -accel tcg,tb-size=${QEMU_TB_MB:-384} \
   -drive if=pflash,format=raw,readonly=on,file="$EFI" \
   -drive if=pflash,format=raw,file=vars.fd \

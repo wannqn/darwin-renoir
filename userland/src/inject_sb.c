@@ -189,7 +189,7 @@ battery_state(id self, SEL sel)
 	int ma = sysctl_int("kern.redwood.battery_current_ma");
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	if (ma == -1 && soc == -1) {
+	if (soc < 0 || soc > 100) {
 		return original_battery_state ? original_battery_state(self, sel) : 0;
 	}
 	if (ma < -50) {		/* negative current = charging */

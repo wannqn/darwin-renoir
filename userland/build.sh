@@ -63,7 +63,13 @@ IOS_JOBS=${JOBS-"
 # WIFID=1: iOS's own Wi-Fi daemon as well, for Settings to have a Wi-Fi to show: the kernel answers it in
 # bsd/dev/redwood_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
 # networks the radio hears. NOT FINISHED: a network cannot be joined from Settings yet.
-[ -n "$WIFID" ] && IOS_JOBS="$IOS_JOBS com.apple.wifid"
+if [ -n "$WIFID" ]; then
+	if [ ! -f ../xnu/files/bsd/dev/redwood_apple80211.c ] || [ ! -f ../xnu/files/bsd/sys/redwood_sta.h ]; then
+		echo "build.sh: WIFID requires redwood_apple80211.c and redwood_sta.h, absent from upstream b1616f7" >&2
+		exit 1
+	fi
+	IOS_JOBS="$IOS_JOBS com.apple.wifid"
+fi
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libredwood.dylib, src/inject_sb.c is libredwood-sb.dylib, src/inject_media.c is
 # libredwood-media.dylib).
@@ -149,7 +155,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
 	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
 	# points back into /var); point them at the data that ships with the system, and use this machine's zone
-	zone=$(timedatectl show -p Timezone --value 2>/dev/null); zone=${zone:-UTC}
+	zone=${TZ:-$(timedatectl show -p Timezone --value 2>/dev/null || true)}; zone=${zone:-UTC}
 	sed -i -e 's|^l\t/usr/share/zoneinfo\t/private/var/db/timezone/zoneinfo$|l\t/usr/share/zoneinfo.default\t/private/var/db/timezone/zoneinfo|' \
 		-e "s|^l\t/var/db/timezone/zoneinfo/[^\t]*\t/private/var/db/timezone/localtime\$|l\t/var/db/timezone/zoneinfo/$zone\t/private/var/db/timezone/localtime|" root/etc/var.skel
 	# ... and the files of ours it puts there (var/): those under mobile/ belong to the user mobile
@@ -165,10 +171,16 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $IOS/rootfs root/LaunchDaemons $IOS_JOBS
 fi
 # firmware of the phone's own hardware, where somebody has pulled it from the phone's Android into ../fw-gpu
-# (it is the vendor's and never in the repository): the kernel's GPU bring-up, bsd/dev/redwood_adreno.c, finds it in fw/
-if [ -d ../fw-gpu ]; then
-	mkdir -p root/fw
-	cp ../fw-gpu/* root/fw/
+# (it is the vendor's and never in the repository). Per-board directories keep
+# identically named a660_* files separate: fw/ for redwood, fw-renoir/ for renoir.
+bash ./pack-gpu-firmware.sh ../fw-gpu root
+# Renoir's PCIe/MHI radio has its own firmware. Never feed it the WPSS image
+# or board/calibration data of redwood's on-SoC WCN6750.
+if [ -d ../fw-wifi/renoir ]; then
+	mkdir -p root/fw-wifi-renoir
+	for f in amss20.bin m3.bin bd_k9gl.elf regdb.bin; do
+		[ ! -f ../fw-wifi/renoir/$f ] || install -m 0644 ../fw-wifi/renoir/$f root/fw-wifi-renoir/$f
+	done
 fi
 # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
 # (bsd/dev/redwood_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
@@ -179,10 +191,13 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	for f in bd_m20gl.elf regdb_xiaomi.bin; do
 		[ -f ../fw-wifi/qca6750/$f ] && install -m 0644 ../fw-wifi/qca6750/$f root/fw/
 	done
-	# the network the radio is to join: its name on the first line, its passphrase on the second. Yours, and
-	# so not in the repository; it goes where the firmware goes and the kernel reads it there (wifi_join=1)
-	rm -f root/fw/network
-	[ -f ../fw-wifi/network ] && install -m 0600 ../fw-wifi/network root/fw/network
+
+fi
+# Both radio transports use the same private network file.
+mkdir -p root/fw
+rm -f root/fw/network
+if [ -f ../fw-wifi/network ]; then
+	install -m 0600 ../fw-wifi/network root/fw/network
 fi
 ../mkpackfs.py -o root.packfs root
 

@@ -34,11 +34,20 @@
 # One phone, several working copies: a run holds a lock, and `stop` and `reboot` from another working
 # copy than the one it was started from are refused (XL_FORCE=1 to end it all the same).
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
+XL_DEVICE=${XL_DEVICE:-redwood}
+case "$XL_DEVICE" in redwood|renoir) ;; *) echo "xl: XL_DEVICE must be redwood or renoir" >&2; exit 1 ;; esac
 # the kernel and the loader built here, or else the ones that come with the repository
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 [ -f $K ] || K=prebuilt/mach.development.bcm2837
 L=xnuloader/loader.efi
 [ -f $L ] || L=prebuilt/loader.efi
+if [ "$XL_DEVICE" = renoir ]; then
+	L=xnuloader/loader-renoir.efi
+	[ -f "$L" ] && [[ "$K" != prebuilt/* ]] || {
+		echo "xl: renoir needs xnuloader/build.sh renoir and a rebuilt XNU kernel; see docs/renoir.md" >&2
+		exit 1
+	}
+fi
 mkdir -p logs
 # There is one phone, whichever working copy (tools/new-workspace.sh) talks to it: the locks are
 # outside all of them.
@@ -62,9 +71,24 @@ wait_for() { # wait_for <state> <seconds>
 	return 1
 }
 
+check_product() {
+	local product
+	product=$(fb getvar product | sed -n 's/^product: //p')
+	[ "$product" = "$XL_DEVICE" ] || {
+		echo "xl: device reports '$product', selected '$XL_DEVICE'; refusing incompatible boot image" >&2
+		return 1
+	}
+}
+
 enter() {
 	case "$(state)" in
-	loader) return 0 ;;
+	loader)
+		if [ "$XL_DEVICE" = renoir ]; then
+			fb getvar board | grep -q '^board: renoir$' || {
+				echo "xl: resident loader is not a renoir loader" >&2; return 1;
+			}
+		fi
+		return 0 ;;
 	android) adb reboot bootloader; wait_for fastboot 60 || { echo "xl: phone did not reach fastboot"; return 1; } ;;
 	fastboot) ;;
 	absent) echo "xl: waiting for the phone (Android or fastboot)..."
@@ -72,12 +96,13 @@ enter() {
 		[ "$(state)" = absent ] && { echo "xl: phone not reachable"; return 1; }
 		enter; return ;;
 	esac
+	check_product || return 1
 	xnuloader/mkpayload.py -o usb-payload.bin loader.efi=$L --usb >/dev/null &&
-		./mkxnuimg.py -p usb-payload.bin -o xnu-usb.img >/dev/null || { echo "xl: image build failed"; return 1; }
+		./mkxnuimg.py --device "$XL_DEVICE" -p usb-payload.bin -o "xnu-$XL_DEVICE-usb.img" >/dev/null || { echo "xl: image build failed"; return 1; }
 	# Right after the phone enters fastboot the first "boot" is sometimes not taken: try twice.
 	local try
 	for try in 1 2; do
-		FB_TIMEOUT=40 fb boot xnu-usb.img | grep -q OKAY || { sleep 3; continue; }
+		FB_TIMEOUT=40 fb boot "xnu-$XL_DEVICE-usb.img" | grep -q OKAY || { sleep 3; continue; }
 		sleep 6
 		wait_for loader 30 && return 0
 		[ "$(state)" = fastboot ] || break

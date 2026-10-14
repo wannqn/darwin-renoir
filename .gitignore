@@ -40,6 +40,7 @@ __pycache__/
 
 /userland/*
 !/userland/build.sh
+!/userland/pack-gpu-firmware.sh
 !/userland/*.py
 !/userland/rc.*
 !/userland/com.redwood.*.plist

@@ -3,7 +3,13 @@
 # iOS SDK; XNU_SRC is the kernel tree (xnu/apply.sh creates it).
 DARWIN_REDWOOD=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export DARWIN_REDWOOD
-export THEOS=${THEOS:-$HOME/theos}
+if [ -z "${THEOS:-}" ]; then
+  THEOS=$HOME/theos
+  if [ ! -d "$THEOS/toolchain/linux/iphone" ] && [ -d "$DARWIN_REDWOOD/build-tools/theos/toolchain/linux/iphone" ]; then
+    THEOS=$DARWIN_REDWOOD/build-tools/theos
+  fi
+fi
+export THEOS
 export XNU_SRC=${XNU_SRC:-$DARWIN_REDWOOD/xnu-src/xnu-8796.121.2}
 export XNUDEPS=$DARWIN_REDWOOD/xnu-deps
 export PATH=$XNUDEPS/host/bin:$PATH
