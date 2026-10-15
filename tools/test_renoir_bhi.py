@@ -35,6 +35,9 @@ typedef uintptr_t vm_size_t;
 #define SMMU_CBA2R(n) (0x800+4*(n))
 #define SMMU_CB_FSR 0x58
 #define SMMU_FSR_ALL 0xc00001fe
+static int redwood_smmu_lock, smmu_held;
+static void lck_mtx_lock(int *lock) { assert(lock==&redwood_smmu_lock && !smmu_held);smmu_held=1; }
+static void lck_mtx_unlock(int *lock) { assert(lock==&redwood_smmu_lock && smmu_held);smmu_held=0; }
 static uint32_t p[0x4000/4],g[0x2000/4],cb[0x1000/4],s[0x1000/4];
 static uint32_t bar[0x10000/4],c[0x4000/4],d[0x4000/4],t[0x61000/4];
 static uint8_t fw[0x100001], board_file[65536]="\177ELF",regdb_file[700],m3_file[266684];
@@ -267,10 +270,12 @@ static void kmem_free(void *map,vm_offset_t a,unsigned size) {
  frees++;free((void *)a);
 }
 static bool radio_space_find(void) {
+ assert(smmu_held);
  radio_space.match=3;radio_space.context=3;radio_space.old_smr=g[SMMU_SMR(3)/4];radio_space.old_s2cr=g[SMMU_S2CR(3)/4];
  return true;
 }
 static bool radio_enter(uint64_t a,uint64_t p,uint64_t n,uint64_t attributes) {
+ assert(smmu_held);
  (void)attributes;
  assert(a==RADIO_ADDRESSES && p==0x98000000 && n==allocation);mapped=true;return true;
 }

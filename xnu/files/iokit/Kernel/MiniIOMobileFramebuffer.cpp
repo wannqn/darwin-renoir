@@ -37,6 +37,8 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 
 #include "MiniIOSurface.h"
 
+extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
+
 /* IOConnectCallMethod selectors of the framebuffer user client (iOS 16.5) */
 enum {
 	kFBMethodGetLayerDefaultSurface = 3,
@@ -122,26 +124,83 @@ static TUNABLE(uint32_t, gFBTrace, "fbtrace", 3);
  * hands it to the host ("xl recording"), where tools/recording.py makes a video of it.
  *
  *   struct rec_header, then per frame: struct rec_frame, width * height pixels (R, G, B)
+ *
+ * Boot-arg rec_ring=1: when the memory is full the recording does not stop but goes on over its
+ * oldest frames, so that what it holds at the end is the last of the run: for something that
+ * happens once in a long session, the run is ended right after it (five fingers) and the frames
+ * before it are there. The header ("RWREC003") says where the oldest frame is (frames are all
+ * the same size, one after the other) and when the recording began, in the kernel's time, for the
+ * frames to be matched with what the window server's per-frame lines (glframes=1,
+ * userland/src/eagl.c) say. rec_step=N (2 to 8, default 3) keeps one pixel of every N instead of 3:
+ * N = 4 holds 1.8 times as many frames, 6 four times. The memory is taken from the system's for the
+ * whole run: 640 MB of it under a long session of applications had iOS killing processes for
+ * memory, SpringBoard and the window server among them (two respring in one run); 256 did not.
  */
 static TUNABLE(uint32_t, gRecSeconds, "rec_secs", 0);
 static TUNABLE(uint32_t, gRecStart, "rec_start", 0);
 static TUNABLE(uint32_t, gRecMegabytes, "rec_mb", 480);
+static TUNABLE(uint32_t, gRecRing, "rec_ring", 0);
+static TUNABLE(uint32_t, gRecStep, "rec_step", 3);
 static TUNABLE(uint32_t, gDiff, "fb_diff", 0);
+/*
+ * Boot-arg fb_filter=0: the picture is scaled to the panel nearest neighbour, as it once was. The
+ * iPhone's 1125 x 2436 on this panel's 1080 x 2400 is 45 columns and 36 rows fewer: nearest
+ * neighbour leaves out every 25th column and every 67th row, and where one of them goes through a
+ * letter or a slanting line, that is a step in it or a stroke a pixel thinner -- text and lines a
+ * little crooked, here and there and never in the same places twice. By default every pixel of the
+ * panel is worked out from the four of the picture around where it falls (bilinear).
+ */
+static TUNABLE(uint32_t, gFilter, "fb_filter", 1);
 static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
+/*
+ * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
+ * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
+ * to 10 (the phone, 15 October; fb_threads=1 is how it was).
+ */
+static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
+#define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
+static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
+static inline unsigned
+swapQueue(void)
+{
+	return gQueue >= 1 && gQueue <= SWAP_QUEUE ? gQueue : 1;
+}
+/*
+ * Boot-arg touch_lat=1: a line for every swap handed over ("tl: s ID at US") and for every frame
+ * put on the panel ("tl: v ID ready US shown US done US": the GPU done with it, its beat come, the
+ * pixels in the panel's memory), in microseconds of mach_absolute_time, for measuring how long a
+ * touch takes to show (tools/latency.py; the touch's own lines: bsd/dev/redwood_input.c).
+ */
+static TUNABLE(uint32_t, gTouchLat, "touch_lat", 0);
+
+static inline uint64_t
+micros(uint64_t absolute)
+{
+	uint64_t ns;
+
+	absolutetime_to_nanoseconds(absolute, &ns);
+	return ns / 1000;
+}
 
 static inline uint32_t
 refreshHz(void)
 {
 	return gRefreshHz >= 1 && gRefreshHz <= 240 ? gRefreshHz : kFBRefreshHz;
 }
-#define REC_STEP        3
+static inline uint32_t
+recStep(void)
+{
+	return gRecStep >= 2 && gRecStep <= 8 ? gRecStep : 3;
+}
+#define REC_STEP        recStep()
 
 struct rec_header {
-	char     magic[8];              /* "RWREC002" */
+	char     magic[8];              /* "RWREC003" */
 	uint32_t width, height;
 	uint32_t frames;
-	uint32_t reserved;
+	uint32_t oldest;                /* the place of the oldest frame (rec_ring; 0 until the memory has once been full) */
+	uint64_t began;                 /* when the first frame was recorded, in nanoseconds of the kernel's time */
 };
 struct rec_frame {
 	uint64_t nanoseconds;           /* since the first frame of the recording */
@@ -159,6 +218,8 @@ swapWord(const uint8_t * swap, unsigned offset)
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+struct RowJob;
 
 class IOMobileFramebuffer : public IOService
 {
@@ -180,11 +241,14 @@ public:
 	 * frame waits at a time: the swap after it is held, in SwapEnd, until this one is being
 	 * copied to the panel. Whoever draws is so at most two frames ahead of the panel, and
 	 * needs a third surface to be that: CoreAnimation makes itself a new one for every frame.
+	 * By default two frames may wait (boot-arg fb_queue=1: one, as before): CoreAnimation draws on a
+	 * clock of its own, and a SwapEnd held past its next tick makes that tick late, the clock going
+	 * on from there (rc.jobs.fps: 28% of the frames over 16.7 ms with two, 33% with one).
 	 */
 	IOLock *        fSwapLock;              /* around the next five */
-	uint8_t         fSwap[SWAP_SIZE];       /* the swap that is on its way to the panel */
-	MiniIOSurface * fSwapSurfaces[SWAP_LAYERS];     /* ... its surfaces, held from SwapEnd on: their maker may let go of them */
-	bool            fSwapThere;
+	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
+	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
+	unsigned        fSwapFirst, fSwapsWaiting;
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
@@ -219,10 +283,14 @@ public:
 	uint32_t        fDiffLeft, fDiffTop, fDiffRight, fDiffBottom;
 	/* the screen recording, if one was asked for */
 	uint32_t *      fColumn;                /* drawLayer(): source column for every panel column */
+	uint16_t *      fColumnWeight;          /* ... with fb_filter: how much of the column after it, of 256 */
+	uint32_t *      fBlendRow;              /* ... and a row of the picture blended from two (fBlendRowSize pixels) */
+	uint32_t        fBlendRowSize;
 	uint8_t *       fRecBase;
 	uint64_t        fRecSize, fRecUsed;
 	uint64_t        fFirstFrame, fRecFirst; /* when the first frame was shown, and the first recorded */
 	bool            fRecDone;
+	bool            fRecWrapped;            /* (rec_ring) the memory has been full once: frames go over the oldest */
 
 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
 	void publishModes(void);
@@ -233,6 +301,15 @@ public:
 	static void presenterMain(void * self, wait_result_t result);
 	void reportFrameTimes(void);
 	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
+	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
+	static void helperMain(void * self, wait_result_t result);
+	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
+	unsigned        fThreads;
+	IOLock *        fHelperLock;
+	const struct RowJob * fHelperJob;
+	uint64_t        fHelperGeneration;
+	unsigned        fHelpersBusy, fHelpersStarted;
+	uint32_t *      fHelperBlend[7];
 	void record(MiniIOSurface * s);
 };
 
@@ -330,6 +407,16 @@ IOMobileFramebuffer::start(IOService * provider)
 	}
 	thread_set_thread_name(thread, "frames to the panel");
 	thread_deallocate(thread);
+	fThreads = gThreads >= 1 && gThreads <= 8 ? gThreads : 1;
+	fHelperLock = IOLockAlloc();
+	for (unsigned i = 0; i + 1 < fThreads; i++) {
+		if (kernel_thread_start(&IOMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {
+			fThreads = i + 1;
+			break;
+		}
+		thread_set_thread_name(thread, "frames to the panel: a helper");
+		thread_deallocate(thread);
+	}
 	fBase = (uint8_t *) vinfo.v_baseaddr;
 	fPanelWidth = vinfo.v_width;
 	fPanelHeight = vinfo.v_height;
@@ -353,6 +440,7 @@ IOMobileFramebuffer::start(IOService * provider)
 		}
 	}
 	fColumn = IONewZero(uint32_t, fPanelWidth);
+	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
 	fDiff = gDiff != 0;
 	fDiffLeft = fDiffTop = ~0u;
 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
@@ -370,14 +458,15 @@ IOMobileFramebuffer::start(IOService * provider)
 			fRecSize = (uint64_t) gRecMegabytes << 20;
 			fRecUsed = sizeof(*header);
 			bzero(header, sizeof(*header));
-			memcpy(header->magic, "RWREC002", 8);
+			memcpy(header->magic, "RWREC003", 8);
 			header->width = fWidth / REC_STEP;
 			header->height = fHeight / REC_STEP;
 			loader_recording[0] = memory->getPhysicalSegment(0, NULL);
 			loader_recording[1] = fRecUsed;
 			loader_recording[2] = (uint64_t) (uintptr_t) fRecBase;
-			IOLog("MiniIOMobileFramebuffer: recording %u s of the screen at %ux%u from second %u, into %u MB at %#llx\n",
-			    gRecSeconds, header->width, header->height, gRecStart, gRecMegabytes, loader_recording[0]);
+			IOLog("MiniIOMobileFramebuffer: recording %u s of the screen at %ux%u from second %u, into %u MB at %#llx%s\n",
+			    gRecSeconds, header->width, header->height, gRecStart, gRecMegabytes, loader_recording[0],
+			    gRecRing ? ", the last of it kept (rec_ring)" : "");
 		} else {
 			IOLog("MiniIOMobileFramebuffer: no memory for a recording of %u MB\n", gRecMegabytes);
 		}
@@ -397,7 +486,7 @@ void
 IOMobileFramebuffer::record(MiniIOSurface * s)
 {
 	struct rec_header * header = (struct rec_header *) fRecBase;
-	uint64_t now = mach_absolute_time(), since_first, since_start = 0;
+	uint64_t now = mach_absolute_time(), since_first, since_start = 0, frame_size;
 	struct rec_frame * frame;
 	uint8_t * to;
 
@@ -412,14 +501,25 @@ IOMobileFramebuffer::record(MiniIOSurface * s)
 		return;
 	}
 	if (fRecFirst == 0) {
+		uint64_t began;
+
 		fRecFirst = now;
+		absolutetime_to_nanoseconds(now, &began);
+		header->began = began;
+		IOLog("MiniIOMobileFramebuffer: the recording begins at %llu.%03llu s of the kernel's time (mach_absolute_time)\n",
+		    began / NSEC_PER_SEC, began / NSEC_PER_MSEC % 1000);
 	}
 	absolutetime_to_nanoseconds(now - fRecFirst, &since_start);
-	if (since_start > (uint64_t) gRecSeconds * NSEC_PER_SEC ||
-	    fRecUsed + sizeof(*frame) + (uint64_t) header->width * header->height * 3 > fRecSize) {
+	frame_size = sizeof(*frame) + (uint64_t) header->width * header->height * 3;
+	if (since_start > (uint64_t) gRecSeconds * NSEC_PER_SEC || (fRecUsed + frame_size > fRecSize && !gRecRing)) {
 		fRecDone = true;
 		IOLog("MiniIOMobileFramebuffer: recording finished: %u frames, %llu MB\n", header->frames, fRecUsed >> 20);
 		return;
+	}
+	if (fRecUsed + frame_size > fRecSize) {
+		/* (rec_ring) round again: over the oldest, which is the next one */
+		fRecUsed = sizeof(*header);
+		fRecWrapped = true;
 	}
 	frame = (struct rec_frame *) (fRecBase + fRecUsed);
 	frame->nanoseconds = since_start;
@@ -435,9 +535,18 @@ IOMobileFramebuffer::record(MiniIOSurface * s)
 			*to++ = (uint8_t) pixel;
 		}
 	}
-	fRecUsed += sizeof(*frame) + (uint64_t) header->width * header->height * 3;
-	header->frames++;
-	loader_recording[1] = fRecUsed;
+	fRecUsed += frame_size;
+	if (!fRecWrapped) {
+		header->frames++;
+		loader_recording[1] = fRecUsed;
+	} else {
+		/* the memory full of frames: all of them are handed over, from the one after this */
+		header->oldest = (uint32_t) ((fRecUsed - sizeof(*header)) / frame_size);
+		if (header->oldest >= header->frames) {
+			header->oldest = 0;
+		}
+		loader_recording[1] = sizeof(*header) + (uint64_t) header->frames * frame_size;
+	}
 }
 
 MiniIOSurface *
@@ -452,18 +561,169 @@ IOMobileFramebuffer::defaultSurface(void)
 }
 
 /*
+ * Two pixels mixed: `w` of 256 of the second. Two of the four channels at a time, in one word.
+ */
+static inline uint32_t
+blend(uint32_t a, uint32_t b, uint32_t w)
+{
+	uint32_t rb = ((a & 0xff00ff) * (256 - w) + (b & 0xff00ff) * w) >> 8 & 0xff00ff;
+	uint32_t ga = ((a >> 8 & 0xff00ff) * (256 - w) + (b >> 8 & 0xff00ff) * w) & 0xff00ff00;
+
+	return rb | ga;
+}
+
+/*
+ * Where the middle of the `i`th of `out` pixels falls among `in` of them, in 256ths of a pixel,
+ * kept within the first and the last.
+ */
+static inline int64_t
+sample_at(int64_t i, int64_t in, int64_t out)
+{
+	int64_t at = ((2 * i + 1) * in - out) * 128 / out;
+
+	return at < 0 ? 0 : at > (in - 1) * 256 ? (in - 1) * 256 : at;
+}
+
+/*
+ * The rows of one layer, from `y0` to `y1` (panel rows), as drawLayer() has worked them out:
+ * scaling a whole frame takes one processor some 9 ms, so with boot-arg fb_threads=N it is shared
+ * out between N of them, each with rows of its own and a row of blending of its own.
+ */
+struct RowJob {
+	const uint8_t * pixels;
+	uint32_t        stride;
+	int32_t         sx, sy, sw, sh, px0, py0, px1, py1, cx0, cx1;
+	bool            filter, unscaled;
+};
+
+void
+IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
+{
+	const uint8_t * pixels = job->pixels;
+	uint32_t stride = job->stride;
+	int32_t sx = job->sx, sy = job->sy, sw = job->sw, sh = job->sh;
+	int32_t px0 = job->px0, py0 = job->py0, px1 = job->px1, py1 = job->py1, cx0 = job->cx0, cx1 = job->cx1;
+	bool filter = job->filter;
+
+	for (int32_t y = y0; y < y1; y++) {
+		const uint32_t * from;
+		uint32_t * to;
+
+		if (y < 0 || (uint32_t) y >= fPanelHeight) {
+			continue;
+		}
+		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+		if (job->unscaled) {
+			/* not scaled at all */
+			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
+			continue;
+		}
+		if (filter) {
+			int64_t at = sample_at(y - py0, sh, py1 - py0);
+			uint32_t row = (uint32_t) (at >> 8), weight = (uint32_t) (at & 255);
+			const uint32_t * upper = (const uint32_t *) (pixels + (size_t) (sy + row) * stride) + sx;
+
+			if (weight == 0 || row + 1 >= (uint32_t) sh) {
+				from = upper;
+			} else {
+				const uint32_t * lower = (const uint32_t *) (pixels + (size_t) (sy + row + 1) * stride) + sx;
+				uint32_t first = fColumn[cx0], last = fColumn[cx1 - 1] + 1 < (uint32_t) sw ? fColumn[cx1 - 1] + 1 : fColumn[cx1 - 1];
+
+				uint32_t * __restrict mixed = blendRow;
+
+				for (uint32_t c = first; c <= last; c++) {
+					uint32_t a = upper[c], b = lower[c];
+
+					mixed[c] = a == b ? a : blend(a, b, weight);           /* (most of a screen is the same as next to it) */
+				}
+				from = blendRow;
+			}
+		} else {
+			from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
+		}
+		if (fDiff) {
+			for (int32_t x = cx0; x < cx1; x++) {
+				uint32_t value = filter ? blend(from[fColumn[x]], from[fColumn[x] + (fColumnWeight[x] != 0)], fColumnWeight[x]) :
+				    from[fColumn[x]];
+
+				if (to[x] != value) {
+					fDiffPixels++;
+					fDiffLeft = (uint32_t) x < fDiffLeft ? (uint32_t) x : fDiffLeft;
+					fDiffRight = (uint32_t) x > fDiffRight ? (uint32_t) x : fDiffRight;
+					fDiffTop = (uint32_t) y < fDiffTop ? (uint32_t) y : fDiffTop;
+					fDiffBottom = (uint32_t) y > fDiffBottom ? (uint32_t) y : fDiffBottom;
+				}
+			}
+		}
+		if (filter) {
+			const uint32_t * __restrict column = fColumn + cx0;
+			const uint16_t * __restrict weights = fColumnWeight + cx0;
+			uint32_t * __restrict out = to + cx0;
+
+			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
+				uint32_t c = column[i], w = weights[i], a = from[c];
+
+				out[i] = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
+			}
+		} else {
+			for (int32_t x = cx0; x < cx1; x++) {
+				to[x] = from[fColumn[x]];
+			}
+		}
+	}
+}
+
+/* A helper of the scaling (fb_threads): waits for rows to do, does them, says so. */
+void
+IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+{
+	IOMobileFramebuffer * fb = (IOMobileFramebuffer *) self;
+	unsigned index;
+	uint64_t done = 0;
+
+	IOLockLock(fb->fHelperLock);
+	index = fb->fHelpersStarted++;
+	IOLockUnlock(fb->fHelperLock);
+	for (;;) {
+		const RowJob * job;
+		int32_t rows, y0, y1;
+		uint32_t * blend;
+
+		IOLockLock(fb->fHelperLock);
+		while (fb->fHelperGeneration == done) {
+			IOLockSleep(fb->fHelperLock, &fb->fHelperGeneration, THREAD_UNINT);
+		}
+		done = fb->fHelperGeneration;
+		job = fb->fHelperJob;
+		IOLockUnlock(fb->fHelperLock);
+		/* share index + 1 of fThreads (the presenter takes share 0) */
+		rows = job->py1 - job->py0;
+		y0 = job->py0 + (int32_t) ((int64_t) rows * (index + 1) / fb->fThreads);
+		y1 = job->py0 + (int32_t) ((int64_t) rows * (index + 2) / fb->fThreads);
+		blend = fb->fHelperBlend[index];
+		fb->drawRows(job, y0, y1, blend);
+		IOLockLock(fb->fHelperLock);
+		fb->fHelpersBusy--;
+		if (fb->fHelpersBusy == 0) {
+			IOLockWakeup(fb->fHelperLock, &fb->fHelpersBusy, true);
+		}
+		IOLockUnlock(fb->fHelperLock);
+	}
+}
+
+/*
  * Put a rectangle of a 32-bit surface on the screen. `dst` is in display coordinates; the
  * panel may be of another size, and the layer itself may be scaled: both are done in one
- * step, nearest neighbour.
+ * step, bilinear (or nearest neighbour: fb_filter=0).
  */
 void
 IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
 {
 	int32_t sx = src[0], sy = src[1], sw = src[2], sh = src[3];
 	int32_t dx = dst[0], dy = dst[1], dw = dst[2], dh = dst[3];
-	const uint8_t * pixels = s->pixels();
-	uint32_t stride = s->info.bytesPerRow;
 	int32_t px0, py0, px1, py1, cx0, cx1;
+	bool filter = gFilter != 0;
+	RowJob job;
 
 	if (sw <= 0 || sh <= 0) {
 		sx = sy = 0;
@@ -486,40 +746,74 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	if (px1 <= px0 || py1 <= py0) {
 		return;
 	}
+	/* (blending, a row of the picture mixed from two: room for it, for every one who draws rows) */
+	if (filter && fBlendRowSize < (uint32_t) sw) {
+		if (fBlendRow != NULL) {
+			IODelete(fBlendRow, uint32_t, fBlendRowSize);
+		}
+		for (unsigned i = 0; i + 1 < fThreads; i++) {
+			if (fHelperBlend[i] != NULL) {
+				IODelete(fHelperBlend[i], uint32_t, fBlendRowSize);
+			}
+		}
+		fBlendRowSize = (uint32_t) sw;
+		fBlendRow = IONew(uint32_t, fBlendRowSize);
+		for (unsigned i = 0; i + 1 < fThreads; i++) {
+			fHelperBlend[i] = IONew(uint32_t, fBlendRowSize);
+			if (fHelperBlend[i] == NULL && fBlendRow != NULL) {
+				IODelete(fBlendRow, uint32_t, fBlendRowSize);
+				fBlendRow = NULL;
+			}
+		}
+		if (fBlendRow == NULL) {
+			fBlendRowSize = 0;
+		}
+	}
+	filter = filter && fBlendRow != NULL;
 	/* which pixel of a source row each pixel of a panel row takes: worked out once, not 2.6 million times */
 	cx0 = px0 < 0 ? 0 : px0;
 	cx1 = (uint32_t) px1 > fPanelWidth ? (int32_t) fPanelWidth : px1;
 	for (int32_t x = cx0; x < cx1; x++) {
-		fColumn[x] = (uint32_t) (sx + (int64_t) (x - px0) * sw / (px1 - px0));
-	}
-	for (int32_t y = py0; y < py1; y++) {
-		const uint32_t * from;
-		uint32_t * to;
+		if (filter) {
+			int64_t at = sample_at(x - px0, sw, px1 - px0);
 
-		if (y < 0 || (uint32_t) y >= fPanelHeight) {
-			continue;
-		}
-		from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
-		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
-		if (px1 - px0 == sw && px0 >= 0 && (uint32_t) px1 <= fPanelWidth) {
-			memcpy(to + px0, from + sx, (size_t) sw * 4);
-			continue;
-		}
-		if (fDiff) {
-			for (int32_t x = cx0; x < cx1; x++) {
-				if (to[x] != from[fColumn[x]]) {
-					fDiffPixels++;
-					fDiffLeft = (uint32_t) x < fDiffLeft ? (uint32_t) x : fDiffLeft;
-					fDiffRight = (uint32_t) x > fDiffRight ? (uint32_t) x : fDiffRight;
-					fDiffTop = (uint32_t) y < fDiffTop ? (uint32_t) y : fDiffTop;
-					fDiffBottom = (uint32_t) y > fDiffBottom ? (uint32_t) y : fDiffBottom;
-				}
-			}
-		}
-		for (int32_t x = cx0; x < cx1; x++) {
-			to[x] = from[fColumn[x]];
+			fColumn[x] = (uint32_t) (at >> 8);              /* (in the blended row: from sx on) */
+			fColumnWeight[x] = (uint16_t) (fColumn[x] + 1 < (uint32_t) sw ? at & 255 : 0);
+		} else {
+			fColumn[x] = (uint32_t) (sx + (int64_t) (x - px0) * sw / (px1 - px0));
 		}
 	}
+	job.pixels = s->pixels();
+	job.stride = s->info.bytesPerRow;
+	job.sx = sx;
+	job.sy = sy;
+	job.sw = sw;
+	job.sh = sh;
+	job.px0 = px0;
+	job.py0 = py0;
+	job.px1 = px1;
+	job.py1 = py1;
+	job.cx0 = cx0;
+	job.cx1 = cx1;
+	job.filter = filter;
+	job.unscaled = px1 - px0 == sw && py1 - py0 == sh && px0 >= 0 && (uint32_t) px1 <= fPanelWidth;
+	if (fThreads <= 1 || fDiff || fHelpersStarted + 1 < fThreads) {
+		drawRows(&job, py0, py1, fBlendRow);
+		return;
+	}
+	/* shared out: the helpers take their rows, this thread the first share, then waits for them */
+	IOLockLock(fHelperLock);
+	fHelperJob = &job;
+	fHelpersBusy = fThreads - 1;
+	fHelperGeneration++;
+	IOLockWakeup(fHelperLock, &fHelperGeneration, false);
+	IOLockUnlock(fHelperLock);
+	drawRows(&job, py0, py0 + (int32_t) ((int64_t) (py1 - py0) / fThreads), fBlendRow);
+	IOLockLock(fHelperLock);
+	while (fHelpersBusy != 0) {
+		IOLockSleep(fHelperLock, &fHelpersBusy, THREAD_UNINT);
+	}
+	IOLockUnlock(fHelperLock);
 }
 
 /*
@@ -572,24 +866,30 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz() * 5 / 4, &period);
 	nanoseconds_to_absolutetime(FRAME_PAUSE * NSEC_PER_MSEC, &pause);
 	clock_interval_to_deadline(SWAP_HELD_MS, kMillisecondScale, &deadline);
+	if (gTouchLat) {
+		redwood_tl("tl: s %u at %llu\n", swapWord(swap, SWAP_ID), micros(now));
+	}
 	IOLockLock(fSwapLock);
 	fStatSwapsLate += fSwapTime != 0 && now - fSwapTime > period && now - fSwapTime < pause;
 	fSwapTime = now;
-	fStatHeld += fSwapThere;
-	while (fSwapThere) {
-		if (IOLockSleepDeadline(fSwapLock, &fSwapThere, deadline, THREAD_UNINT) == THREAD_TIMED_OUT && fSwapThere) {
+	fStatHeld += fSwapsWaiting >= swapQueue();
+	while (fSwapsWaiting >= swapQueue()) {
+		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
+		    fSwapsWaiting >= swapQueue()) {
 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
 			IOLockUnlock(fSwapLock);
 			return;
 		}
 	}
-	memcpy(fSwap, swap, SWAP_SIZE);
+	unsigned slot = (fSwapFirst + fSwapsWaiting) % SWAP_QUEUE;
+
+	memcpy(fSwap[slot], swap, SWAP_SIZE);
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
-		fSwapSurfaces[layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
 	}
-	fSwapThere = true;
+	fSwapsWaiting++;
 	IOLockWakeup(fSwapLock, fSwap, true);
 	IOLockUnlock(fSwapLock);
 }
@@ -608,11 +908,11 @@ IOMobileFramebuffer::presenter(void)
 
 	for (;;) {
 		IOLockLock(fSwapLock);
-		while (!fSwapThere) {
+		while (fSwapsWaiting == 0) {
 			IOLockSleep(fSwapLock, fSwap, THREAD_UNINT);
 		}
-		memcpy(swap, fSwap, SWAP_SIZE);
-		memcpy(surfaces, fSwapSurfaces, sizeof(surfaces));
+		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
+		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
 		IOLockUnlock(fSwapLock);
 		show(swap, surfaces);
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
@@ -629,8 +929,9 @@ void
 IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 {
 	uint32_t set = swapWord(swap, SWAP_LAYERS_SET);
-	uint64_t began = mach_absolute_time(), nanos;
+	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
 	uint32_t layers = 0;
+	MiniIOSurface * recorded = NULL;
 	bool report;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
@@ -640,7 +941,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	fStatWaiting += mach_absolute_time() - began;
-	began = mach_absolute_time();
+	began = ready = mach_absolute_time();
 	if (gOnTheBeat) {
 		uint64_t period, aim, next;
 
@@ -665,10 +966,12 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			began = mach_absolute_time();
 		}
 	}
+	shown = began;
 	/* its turn has come: the swap after it may be handed over */
 	IOLockLock(fSwapLock);
-	fSwapThere = false;
-	IOLockWakeup(fSwapLock, &fSwapThere, true);
+	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+	fSwapsWaiting--;
+	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
 	IOLockUnlock(fSwapLock);
 	IOLockLock(fLock);
 	if (fLastFrame != 0) {
@@ -733,11 +1036,19 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 			drawLayer(s, src, dst);
 			if (layer == 0) {
-				record(s);
+				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 			}
 		}
 	}
+	drawn = mach_absolute_time();
+	if (recorded != NULL) {
+		record(recorded);
+	}
 	fSwapsShown++;
+	if (gTouchLat) {
+		redwood_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
+		    micros(drawn));
+	}
 	if (layers != fLayersShown) {
 		IOLog("MiniIOMobileFramebuffer: swap #%u: surfaces in layers 0x%x now (0x%x before): %u %u %u %u\n", fSwapsShown, layers,
 		    fLayersShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)), swapWord(swap, SWAP_SURFACE(2)),
@@ -1040,6 +1351,11 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		return kIOReturnSuccess;
 
 	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
+		if (gTouchLat) {
+			redwood_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
+			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
+		}
+		return kIOReturnSuccess;
 	case kFBMethodSwapSignal:
 	case kFBMethodSwapCancel:
 	case kFBMethodSwapCancelAll:

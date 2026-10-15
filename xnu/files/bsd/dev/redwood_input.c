@@ -11,9 +11,9 @@
 #include <sys/errno.h>
 #include <sys/proc.h>
 #include <sys/redwood_input.h>
-#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <pexpert/pexpert.h>
 
 #define TOUCH_QUEUE     512             /* records; a power of two */
 
@@ -30,6 +30,46 @@ redwood_board_is(const char *name)
 	return SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
 	       SecureDTGetProperty(chosen, "darwin-board", &value, &size) == kSuccess &&
 	       size == length && memcmp(value, name, length) == 0;
+}
+
+/*
+ * Boot-arg touch_lat=1: for measuring how long a touch takes to reach the panel, a line for every
+ * sample posted ("tl: p TYPE FINGER X Y at US", the time in microseconds of mach_absolute_time),
+ * to be matched with the window server's lines about reading it (userland/src/inject.c), drawing
+ * (eagl.c) and the display driver's about the frame (MiniIOMobileFramebuffer.cpp): see
+ * tools/latency.py.
+ */
+static uint32_t touch_lat = 2;          /* 2: not yet looked up */
+
+extern void loader_log_line(const char *line);
+
+/*
+ * A "tl:" line, for the kernel's drivers: into the loader's log as it is written -- the kernel's own
+ * log keeps only the last of a run, and a live look at the loader's (XL_FOLLOW) then misses nothing.
+ */
+void redwood_tl(const char *format, ...) __printflike(1, 2);
+
+void
+redwood_tl(const char *format, ...)
+{
+	char line[192];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	loader_log_line(line);
+}
+
+static bool
+latency_lines(void)
+{
+	if (touch_lat == 2) {
+		uint32_t on = 0;
+
+		touch_lat = PE_parse_boot_argn("touch_lat", &on, sizeof(on)) && on != 0;
+	}
+	return touch_lat != 0;
 }
 
 static LCK_GRP_DECLARE(touch_lck_grp, "redwood-touch");
@@ -56,51 +96,12 @@ static thread_call_t exit_call;
 static uint32_t fingers_down;           /* one bit for each finger a driver says is down */
 
 static void
-exit_hold_elapsed(thread_call_param_t p0, __unused thread_call_param_t p1)
+exit_hold_elapsed(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
-	if (p0 != NULL) {
-		printf("\n--- asked for by %s: back to the loader ---\n", (const char *)p0);
-	} else {
-		printf("\n--- %d fingers held on the screen for %d ms: back to the loader ---\n", EXIT_FINGERS, EXIT_HOLD_MS);
-	}
+	printf("\n--- %d fingers held on the screen for %d ms: back to the loader ---\n", EXIT_FINGERS, EXIT_HOLD_MS);
 	redwood_adreno_stop();
 	loader_return();
 }
-
-/*
- * The same way out, asked for by a program (Settings' HackiOS pane: "Return to the loader", behind
- * a confirmation): writing 1 to kern.redwood.leave. Anybody may, as anybody may hold five fingers
- * on the screen.
- */
-static int
-sysctl_leave(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
-{
-	static char who[32];
-	static thread_call_t leave_call;
-	int value = 0, error;
-
-	error = sysctl_handle_int(oidp, &value, 0, req);
-	if (error != 0 || req->newptr == USER_ADDR_NULL || value != 1) {
-		return error;
-	}
-	proc_selfname(who, sizeof(who));
-	if (leave_call == NULL) {
-		leave_call = thread_call_allocate(exit_hold_elapsed, who);
-	}
-	if (leave_call == NULL) {
-		return ENOMEM;
-	}
-	{
-		uint64_t deadline;
-
-		clock_interval_to_deadline(300, NSEC_PER_MSEC, &deadline);      /* (the answer gets out first) */
-		thread_call_enter_delayed(leave_call, deadline);
-	}
-	return 0;
-}
-SYSCTL_DECL(_kern_redwood);
-SYSCTL_PROC(_kern_redwood, OID_AUTO, leave, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, NULL, 0, sysctl_leave,
-    "I", "write 1: end the run, back to the loader (as five fingers held on the screen)");
 
 /* With touch_lock held. */
 static void
@@ -137,6 +138,12 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
 	}
 	t = &touch_queue[touch_tail++ % TOUCH_QUEUE];
 	t->time = mach_absolute_time();
+	if (latency_lines()) {
+		uint64_t ns;
+
+		absolutetime_to_nanoseconds(t->time, &ns);
+		redwood_tl("tl: p %u %u %u %u at %llu\n", type, finger, x, y, ns / 1000);
+	}
 	t->type = type;
 	t->finger = finger;
 	t->x = x > 65535 ? 65535 : x;
@@ -237,4 +244,5 @@ redwood_input_init(void)
 	redwood_net_init();
 	redwood_adreno_init();
 	redwood_wifi_init();
+	redwood_adsp_init();
 }

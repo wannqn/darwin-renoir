@@ -182,6 +182,17 @@ extern kern_return_t thread_terminate(thread_t thread);
 
 static LCK_GRP_DECLARE(wifi_lock_group, "redwood-wifi");
 
+/*
+ * What the audio DSP's start (redwood_adsp.c) uses as well, while this may be at work beside it:
+ * the mailbox to the always-on processor, one message at a time, and the allocation of items in
+ * the shared memory (whose hardware lock both take under the same number, so it does not keep
+ * the two apart).
+ */
+LCK_MTX_DECLARE(redwood_aop_mailbox_lock, &wifi_lock_group);
+LCK_MTX_DECLARE(redwood_smem_alloc_lock, &wifi_lock_group);
+/* ... and the sound's (redwood_sound.c): a free match register and context of the SMMU, found and taken */
+LCK_MTX_DECLARE(redwood_smmu_lock, &wifi_lock_group);
+
 static uint32_t last_step, pause_ms = 2200, fine, watch_seconds = 3;
 static volatile bool renoir_transport_ready;
 static uint32_t step;                   /* the one being performed */
@@ -1481,8 +1492,21 @@ doorbells(void)
  * acknowledgement of ours. Whatever of it has been done already -- by a kernel before this one:
  * the always-on processor is restarted only with the phone -- is found done and left.
  */
+static bool step_mailbox_open_locked(void);
+
 static bool
 step_mailbox_open(void)
+{
+	bool open;
+
+	lck_mtx_lock(&redwood_aop_mailbox_lock);
+	open = step_mailbox_open_locked();
+	lck_mtx_unlock(&redwood_aop_mailbox_lock);
+	return open;
+}
+
+static bool
+step_mailbox_open_locked(void)
 {
 	uint32_t box, size;
 
@@ -1541,8 +1565,24 @@ step_mailbox_open(void)
 }
 
 /* A message to the always-on processor (Linux's qmp_send()). */
+static bool mailbox_send_locked(const char *text);
+
 static bool
 mailbox_send(const char *text)
+{
+	bool sent;
+
+	if (leaving) {
+		return mailbox_send_locked(text);       /* (one processor left, and no lock taken: see redwood_wifi_quiesce()) */
+	}
+	lck_mtx_lock(&redwood_aop_mailbox_lock);
+	sent = mailbox_send_locked(text);
+	lck_mtx_unlock(&redwood_aop_mailbox_lock);
+	return sent;
+}
+
+static bool
+mailbox_send_locked(const char *text)
 {
 	uint32_t words[QMP_MESSAGE / 4] = { 0 };
 
@@ -1937,8 +1977,21 @@ static struct block smem_lock = { "shared memory's lock", 0x01f43000, 0x1000 };
 #define LOCK_US                 1u
 
 /* Our item made in the partition, as Linux's qcom_smem_alloc_private() makes one. False, and why said: not made. */
+static bool our_item_make_locked(uint32_t partition);
+
 static bool
 our_item_make(uint32_t partition)
+{
+	bool made;
+
+	lck_mtx_lock(&redwood_smem_alloc_lock);
+	made = our_item_make_locked(partition);
+	lck_mtx_unlock(&redwood_smem_alloc_lock);
+	return made;
+}
+
+static bool
+our_item_make_locked(uint32_t partition)
 {
 	struct smem_partition header;
 	struct smem_entry entry;
@@ -3903,13 +3956,19 @@ radio_map(uint64_t physical, uint64_t size, uint64_t attributes, unsigned long l
 		    "a context of the SMMU (wifi_smmu=2)\n", step, size >> 10, physical, *address);
 		return true;
 	}
+	lck_mtx_lock(&redwood_smmu_lock);       /* (the sound may be looking for a free context at the same time) */
 	if ((!radio_space.found && !radio_space_find()) || !radio_enter(*address, physical, size, attributes)) {
+		lck_mtx_unlock(&redwood_smmu_lock);
 		return false;
 	}
 	printf("wifi: %u: the radio is to see %llu KB of ours (%#llx) at %#llx\n", step, size >> 10, physical, *address);
 	if (!radio_space.on) {
-		return radio_space_on();
+		bool on = radio_space_on();
+
+		lck_mtx_unlock(&redwood_smmu_lock);
+		return on;
 	}
+	lck_mtx_unlock(&redwood_smmu_lock);
 	put(&apps_smmu_context, "tlbiasid", SMMU_CB_TLBIASID, radio_space.context);
 	put(&apps_smmu_context, "tlbsync", SMMU_CB_TLBSYNC, 1);
 	return true;

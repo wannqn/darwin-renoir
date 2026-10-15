@@ -51,7 +51,9 @@
  * share one, glwait=1 waits for the GPU at the end of every frame and glwait=0 never (see
  * wait_for_frames), glfetch=0 keeps EXT_shader_framebuffer_fetch from CoreAnimation (see
  * fetch_offered), glprecision=0 leaves the shaders' "lowp" and "mediump" as they are (see all_highp), glenv=NAME=VALUE puts that into the environment for the library to find
- * (its own switches: FD_MESA_DEBUG=sysmem, say).
+ * (its own switches: FD_MESA_DEBUG=sysmem, say), vblur=0 blurs nothing whose radius varies and
+ * vblur=2 paints such blurs by their masks instead (see vblur_on), glframes=1 writes a line for
+ * every frame (see frame_end()).
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -119,8 +121,16 @@ typedef GLDEBUGPROC GLDEBUGPROCKHR;
 #define GL_FRAMEBUFFER_COMPLETE         0x8cd5
 #define GL_FRAMEBUFFER                  0x8d40
 
+#define VBLUR_LEVELS    8               /* levels of a blur whose radius varies, the picture itself included */
+#define VBLUR_CHAINS    6               /* ... such blurs kept track of at a time */
+
 struct eagl;
 static int eagl_tracing;                /* this frame's calls are written down (boot-arg gltrace=FIRST-LAST) */
+static int frame_lines;                 /* boot-arg glframes=1: a line for every frame (see frame_end()) */
+static int latency_lines;               /* boot-arg touch_lat=1: when every frame began and ended (see frame_end()) */
+static uint64_t slow_calls_us;          /* boot-arg glslow=US: a line for every call that takes longer (eagl_leave()) */
+static uint64_t call_began_us;          /* (when the call in progress began) */
+static uint64_t now_us(void);
 static void eagl_trace(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void eagl_trace_floats(const float *values, int count);
 static void eagl_enter(struct eagl *e, unsigned offset);
@@ -230,6 +240,17 @@ struct eagl {
 	GLboolean unclear_boxed;
 	GLuint box;                     /* and one that makes a picture eight times smaller */
 	GLint box_matrix, box_places;
+	GLuint halve, vblur;            /* and two for the blur whose radius varies (vblur_level(), vblur_draw_begin()) */
+	GLint halve_texel, vblur_matrix, vblur_radius, vblur_levels, vblur_normalize, vblur_paint;
+	struct vblur_chain {
+		GLuint picture;         /* CoreAnimation's texture, the first level (0: unused) */
+		GLsizei width, height;
+		GLuint level[VBLUR_LEVELS], framebuffer[VBLUR_LEVELS];  /* ours, from the second on (index 1 up) */
+		GLsizei level_width[VBLUR_LEVELS], level_height[VBLUR_LEVELS];
+		int made;               /* how many levels are made of the present picture, the first included */
+		unsigned used;          /* the frame it was last used in */
+	} chains[VBLUR_CHAINS];
+	bool vblur_bound;               /* a draw of ours has textures of its own on units 2 to 5 */
 	unsigned unit;                  /* the texture unit being spoken of */
 	GLuint bound[8];                /* the 2D texture bound to each of the first units */
 	const GLfloat *matrix;          /* where CoreAnimation keeps the matrix it gives its programs */
@@ -240,6 +261,12 @@ struct eagl {
 		GLenum type;
 	} arrays[8];                    /* the vertex arrays, as given */
 	bool in_frame;
+	struct {                        /* what the line a frame gets with glframes=1 says (frame_end()) */
+		bool taken, boxed;      /* the first draw or clear into the display's picture seen; scissored */
+		GLint box[4];
+		uint32_t surface;       /* that picture's IOSurface */
+		unsigned vrd, vrb, into_display;
+	} line;
 	/* a frame's worth */
 	unsigned calls, draws, triangles, uploads, clears, last_draws;
 	uint64_t upload_bytes, began, attaching, flushing;
@@ -312,6 +339,9 @@ eagl_enter(struct eagl *e, unsigned offset)
 	}
 	slot_calls[offset / 8]++;
 	e->calls++;
+	if (slow_calls_us != 0) {
+		call_began_us = now_us();
+	}
 }
 
 static void
@@ -322,6 +352,15 @@ eagl_leave(struct eagl *e, unsigned offset)
 	if (check_errors && offset != 0x338 && (error = glGetError()) != 0) {
 		if (e->errors++ < 60) {
 			say("redwood-gl: %s: error %#x\n", eagl_slot_name(offset), error);
+		}
+	}
+	if (slow_calls_us != 0) {
+		uint64_t now = now_us();
+
+		/* "tl: slow NAME US at US, frame N": a call that took long, and when it ended (tools/frames.py) */
+		if (now - call_began_us >= slow_calls_us) {
+			say("tl: slow %s %llu at %llu, frame %u%s\n", eagl_slot_name(offset), now - call_began_us, now, e->frames + 1,
+			    e->in_frame ? "" : " (before its first draw)");
 		}
 	}
 }
@@ -788,6 +827,24 @@ frame_end(struct eagl *e, bool finished)
 	after = now_us();
 	e->in_frame = false;
 	e->frames++;
+	if (latency_lines) {
+		/* "tl: g FRAME began US ended US DRAWS": microseconds of mach_absolute_time (tools/latency.py) */
+		say("tl: g %u began %llu ended %llu %u\n", e->frames, e->began, after, e->draws);
+	}
+	if (frame_lines) {
+		/*
+		 * One line a frame, for matching with a screen recording (the kernel's rec_ring, whose log
+		 * says when it began in the same time): when the frame ended, in the kernel's time; what was
+		 * drawn; into which of the display's surfaces and, of the first draw or clear into it, the
+		 * scissor box -- CoreAnimation draws only what has changed, inside that box, and leaves the
+		 * rest of the surface as it was --; and the draws of the blur whose radius varies.
+		 */
+		say("redwood-gl: f %u at %llu.%03llu s: %u draws, %u clears; display surface %u, %u draws into it, box %s %d,%d %dx%d; "
+		    "vrd %u vrb %u; %u in place, %u copied\n", e->frames, after / 1000000, after / 1000 % 1000, e->draws, e->clears,
+		    e->line.surface, e->line.into_display, e->line.boxed ? "on" : "off", e->line.box[0], e->line.box[1], e->line.box[2],
+		    e->line.box[3], e->line.vrd, e->line.vrb, in_place, copied);
+		bzero(&e->line, sizeof(e->line));
+	}
 	if (in_place == 0 && copied == 0 && e->draws != 0 && unfollowed < 8) {
 		/* (whatever it was drawn into is shown as it is, drawn or not: this is to be seen in the log) */
 		unfollowed++;
@@ -836,6 +893,16 @@ drawing(struct eagl *e)
 	frame_begin(e);
 	if (e->framebuffer != 0 && e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target) {
 		image->drawn = image->painted = true;
+		if (frame_lines && image->width >= 1000 && image->height >= 2000) {
+			/* the display's picture (a surface of its size): where this frame first draws into it */
+			e->line.into_display++;
+			if (!e->line.taken) {
+				e->line.taken = true;
+				e->line.boxed = glIsEnabled(GL_SCISSOR_TEST);
+				glGetIntegerv(GL_SCISSOR_BOX, e->line.box);
+				e->line.surface = IOSurfaceGetID(image->surface);
+			}
+		}
 	}
 }
 
@@ -875,7 +942,7 @@ my_glClear(void *context, GLbitfield mask)
 		eagl_trace("glClear(%#x)\n", mask);
 	}
 	clear_now(e);
-	if (e->program == 0 && e->colour != 0 && e->colour == e->bound[0]) {
+	if (e->colour != 0) {
 		/* what is about to be cleared may be what the next draw reads: see reads_what_it_writes() */
 		e->unclear = mask;
 		e->unclear_boxed = glIsEnabled(GL_SCISSOR_TEST);
@@ -1210,6 +1277,7 @@ static const char table_fragment[] =
 #define FUNCTION_MATRIX_PREMULTIPLIED   20
 #define FUNCTION_DOWNSAMPLE_8           28
 #define FUNCTION_VARIABLE_DOWNSAMPLE    38
+#define FUNCTION_VARIABLE_BLUR          39
 #define FUNCTION_VIBRANT_MATRIX         45
 
 static const char vibrant_fragment[] =
@@ -1303,16 +1371,297 @@ static int plain_draws = 1;
  * the texture and draw into it with that same texture as the source. What that leaves is the
  * driver's to decide (here now the picture, now nothing: the strip came out black after one
  * route to Search and right after another).
- * A picture is not drawn from itself here, nor cleared for it: the one level stays what it was,
- * and "vrb" then copies it out plainly -- the strip unblurred, which under a status bar over a
- * blurred wallpaper is not seen. What scrolls under it stays sharp where it should fade.
+ * Here the levels are textures of our own, each half the size of the one before, one chain of
+ * them for each picture blurred so: "vrd", whose one number is the level it reads, makes level
+ * L + 1 of level L instead of drawing the picture into itself (vblur_level()), and "vrb" reads
+ * the chain by the mask (vblur_draw_begin()). Boot-arg vblur=0 leaves it as it was before: no
+ * level made, the picture not drawn from itself nor cleared for it, and "vrb" copying it out
+ * plainly -- the strip unblurred. That stand-in had a fault of its own: it showed whatever the
+ * picture last held, and once in a few dozen times in Search that was the wallpaper half dimmed
+ * as it had been in the middle of Search's coming in, until something drew the strip again.
  *
  * Which function a draw is can be asked of CoreAnimation's context only while it draws (between
  * frames the place it is read from may be gone: the window server died of being asked at a
- * glClear). So a clear of the texture that is also the one bound to be read is put off, with
- * the scissor and the colour it was to be made with, until the next draw says what it is: that
- * function, and the clear is dropped with the draw; anything else, and it is made first.
+ * glClear). So every clear of a texture is put off, with the scissor and the colour it was to be
+ * made with, until the next draw says what it is: that function, and the clear is dropped with
+ * the draw; anything else, and it is made first (as it is before anything else that could tell
+ * the difference: another framebuffer, another attachment, a texture deleted or filled, the end
+ * of a frame). Only the clears of a texture that was also bound to be read used to be put off,
+ * but CoreAnimation clears a surface as it makes it the target (GLESContext::set_surface: the
+ * framebuffer, the viewport, the clear), before it binds the textures of the draw that follows:
+ * the first of the four clears found the picture of the step before on the first unit, was
+ * made, and left the strip black -- now in the first Search of a run, now from the second on,
+ * by what had been drawn before.
  */
+/*
+ * Boot-arg vblur=0: the stand-in. vblur=2, for checking: the strip painted by its mask instead of
+ * blurred, red where the radius is whole, blue where there is none, and the mask's pixels in the log.
+ */
+static int vblur_on = 1;
+
+/*
+ * Halving: a pixel of the level made is the average of the sixteen of the level it is made of
+ * around it, by weight (four samples, each the GPU's own average of four pixels), which is what
+ * makes a chain of such levels look blurred rather than coarse when it is read back enlarged.
+ */
+static const char vblur_vertex[] =
+    "#version 300 es\n"
+    "void main() {\n"
+    "  vec2 corner = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);\n"
+    "  gl_Position = vec4(corner, 0.0, 1.0);\n"
+    "}\n";
+static const char halve_fragment[] =
+    "#version 300 es\n"
+    "uniform highp sampler2D source;\n"
+    "uniform highp vec2 texel;\n"
+    "out highp vec4 result;\n"
+    "void main() {\n"
+    "  highp vec2 at = gl_FragCoord.xy * 2.0 * texel;\n"
+    "  result = 0.25 * (texture(source, at + texel * vec2(-1.0, -1.0)) + texture(source, at + texel * vec2(1.0, -1.0)) +\n"
+    "      texture(source, at + texel * vec2(-1.0, 1.0)) + texture(source, at + texel * vec2(1.0, 1.0)));\n"
+    "}\n";
+/*
+ * Reading the chain: the mask (its opacity, on the second unit, at CoreAnimation's second texture
+ * coordinates) says how much of the radius (the function's first number, in pixels of the
+ * picture) is wanted at each pixel; a radius of r is read at level log2(r), between two levels
+ * mixed. The mask's coordinates run past its ends (above the strip's top, below its bottom) and
+ * the texture repeats: unheld, the last row of the strip read the mask's first, the whole radius,
+ * and came out a line blurred darker than what it lay on. They are held to the mask's ends.
+ * With the function's second number set (inputNormalizeEdges, it seems), what the blur drew in
+ * from outside the picture -- nothing, transparent -- is made up for by dividing by the opacity,
+ * as the edges of an ordinary blur are.
+ * The colour's opacity is the blurring layer's (Spotlight's strip fades so while the gesture that
+ * dismisses Search is under way), and CoreAnimation puts what this draws on the screen as it is,
+ * without blending: so the opacity is how much of the blur is shown over the picture itself, not a
+ * darkening. Multiplied in, the strip went dark with it -- to a quarter, in four frames, at each
+ * start of that gesture -- and stayed dark whenever the gesture ended between two of the window
+ * server's renderings of the strip: it reuses the last one until what is behind the strip changes
+ * (the dark strip in Search, rc.jobs.strip).
+ */
+static const char vblur_draw_vertex[] =
+    "#version 300 es\n"
+    "uniform highp mat4 vertex_matrix;\n"
+    "in highp vec4 vertex_position;\n"
+    "in lowp vec4 vertex_color;\n"
+    "in highp vec2 vertex_texcoord0;\n"
+    "in highp vec2 vertex_texcoord1;\n"
+    "out lowp vec4 color;\n"
+    "out highp vec2 texcoord;\n"
+    "out highp vec2 maskcoord;\n"
+    "void main() {\n"
+    "  gl_Position = vertex_matrix * vertex_position;\n"
+    "  color = vertex_color;\n"
+    "  texcoord = vertex_texcoord0;\n"
+    "  maskcoord = vertex_texcoord1;\n"
+    "}\n";
+static const char vblur_fragment[] =
+    "#version 300 es\n"
+    "uniform highp sampler2D level0;\n"
+    "uniform highp sampler2D mask;\n"
+    "uniform highp sampler2D level1;\n"
+    "uniform highp sampler2D level2;\n"
+    "uniform highp sampler2D level3;\n"
+    "uniform highp sampler2D level4;\n"
+    "uniform highp float radius;\n"
+    "uniform int levels;\n"
+    "uniform highp float normalize_edges;\n"
+    "uniform int paint;\n"
+    "in lowp vec4 color;\n"
+    "in highp vec2 texcoord;\n"
+    "in highp vec2 maskcoord;\n"
+    "out highp vec4 result;\n"
+    "highp vec4 level(int k, highp vec2 at) {\n"
+    "  if (k <= 0) return texture(level0, at);\n"
+    "  if (k == 1) return texture(level1, at);\n"
+    "  if (k == 2) return texture(level2, at);\n"
+    "  if (k == 3) return texture(level3, at);\n"
+    "  return texture(level4, at);\n"
+    "}\n"
+    "void main() {\n"
+    "  highp vec2 at = texcoord / vec2(textureSize(level0, 0));\n"
+    "  highp vec2 mask_size = vec2(textureSize(mask, 0));\n"
+    "  highp vec2 m_at = maskcoord.x > 1.5 || maskcoord.y > 1.5 ? maskcoord / mask_size : maskcoord;\n"
+    "  m_at = clamp(m_at, 0.5 / mask_size, 1.0 - 0.5 / mask_size);\n"
+    "  highp float m = texture(mask, m_at).a;\n"
+    "  highp float lod = clamp(log2(max(m * radius, 1.0)), 0.0, float(levels - 1));\n"
+    "  int k = int(floor(lod));\n"
+    "  highp vec4 c = mix(level(k, at), level(min(k + 1, levels - 1), at), lod - float(k));\n"
+    "  if (normalize_edges > 0.5) {\n"
+    "    c = c.a > 0.004 ? vec4(c.rgb / c.a, 1.0) : vec4(0.0);\n"
+    "    highp vec4 sharp = texture(level0, at);\n"
+    "    sharp = sharp.a > 0.004 ? vec4(sharp.rgb / sharp.a, 1.0) : c;\n"
+    "    result = vec4(mix(sharp.rgb, c.rgb, color.a), 1.0);\n"
+    "  } else {\n"
+    "    result = color * c;\n"
+    "  }\n"
+    "  if (paint != 0) {\n"
+    "    highp float t = m;\n"
+    "    result = vec4(t, 0.25 * c.g, 1.0 - t, 1.0);\n"
+    "  }\n"
+    "}\n";
+
+static GLuint
+vblur_program(const char *vertex, const char *fragment, const char *what)
+{
+	GLuint program = glCreateProgram(), shader;
+	const GLchar *text;
+	GLint good = 0;
+	char said[512] = "";
+
+	shader = glCreateShader(GL_VERTEX_SHADER);
+	text = vertex;
+	glShaderSource(shader, 1, &text, NULL);
+	glCompileShader(shader);
+	glAttachShader(program, shader);
+	shader = glCreateShader(GL_FRAGMENT_SHADER);
+	text = fragment;
+	glShaderSource(shader, 1, &text, NULL);
+	glCompileShader(shader);
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &good);
+	if (!good) {
+		glGetShaderInfoLog(shader, sizeof(said), NULL, said);
+	}
+	glAttachShader(program, shader);
+	glBindAttribLocation(program, 0, "vertex_position");
+	glBindAttribLocation(program, 1, "vertex_color");
+	glBindAttribLocation(program, 2, "vertex_texcoord0");
+	glBindAttribLocation(program, 3, "vertex_texcoord1");
+	glLinkProgram(program);
+	glGetProgramiv(program, GL_LINK_STATUS, &good);
+	say("redwood-gl: a program of ours for the blur whose radius varies (%s): %s %s\n", what, good ? "made" : "NOT MADE", said);
+	return good ? program : 0;
+}
+
+static struct vblur_chain *
+vblur_chain_of(struct eagl *e, GLuint picture, bool make)
+{
+	struct vblur_chain *oldest = &e->chains[0];
+
+	for (unsigned i = 0; i < VBLUR_CHAINS; i++) {
+		if (e->chains[i].picture == picture && picture != 0) {
+			return &e->chains[i];
+		}
+		if (e->chains[i].used < oldest->used) {
+			oldest = &e->chains[i];
+		}
+	}
+	if (!make) {
+		return NULL;
+	}
+	/* (the one least lately used gives its textures up; they are made again at the sizes wanted) */
+	oldest->picture = picture;
+	oldest->made = 0;
+	oldest->width = oldest->height = 0;
+	return oldest;
+}
+
+static void
+vblur_forget(struct eagl *e, GLuint picture)
+{
+	struct vblur_chain *chain = vblur_chain_of(e, picture, false);
+
+	if (chain != NULL) {
+		chain->picture = 0;
+		chain->made = 0;
+	}
+}
+
+/*
+ * A draw of "vrd" (function 38) that reads level `from`: level from + 1 is made of it, in a
+ * texture of ours. Every bit of state touched is put back as CoreAnimation had it.
+ */
+static void
+vblur_level(struct eagl *e, int from)
+{
+	GLuint picture = e->bound[0];
+	struct vblur_chain *chain;
+	GLint view[4], box[4], width = 0, height = 0, to = from + 1;
+	GLboolean scissored, blended;
+	GLuint source;
+
+	if (from < 0 || to >= VBLUR_LEVELS || picture == 0) {
+		return;
+	}
+	if (e->halve == 0) {
+		e->halve = vblur_program(vblur_vertex, halve_fragment, "halving");
+		if (e->halve != 0) {
+			glUseProgram(e->halve);
+			glUniform1i(glGetUniformLocation(e->halve, "source"), 0);
+			e->halve_texel = glGetUniformLocation(e->halve, "texel");
+			glUseProgram(0);
+		}
+	}
+	if (e->halve == 0) {
+		return;
+	}
+	glActiveTexture(GL_TEXTURE0);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+	chain = vblur_chain_of(e, picture, true);
+	chain->used = e->frames + 1;
+	if (chain->width != width || chain->height != height) {
+		chain->width = width;
+		chain->height = height;
+		chain->made = 1;
+		for (int k = 1; k < VBLUR_LEVELS; k++) {
+			chain->level_width[k] = 0;
+		}
+	}
+	if (from == 0) {
+		chain->made = 1;                        /* (the picture is new: the levels made of the one before are not of it) */
+	}
+	if (from >= chain->made) {
+		glActiveTexture(GL_TEXTURE0 + e->unit);
+		return;                                 /* (the level it is to be made of is not there) */
+	}
+	if (chain->level_width[to] == 0) {
+		GLsizei w = chain->width, h = chain->height;
+
+		for (int k = 0; k < to; k++) {
+			w = w / 2 > 1 ? w / 2 : 1;
+			h = h / 2 > 1 ? h / 2 : 1;
+		}
+		if (chain->level[to] == 0) {
+			glGenTextures(1, &chain->level[to]);
+			glGenFramebuffers(1, &chain->framebuffer[to]);
+		}
+		glBindTexture(GL_TEXTURE_2D, chain->level[to]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, 0x2801, 0x2601);         /* min filter: linear */
+		glTexParameteri(GL_TEXTURE_2D, 0x2800, 0x2601);         /* mag filter: linear */
+		glTexParameteri(GL_TEXTURE_2D, 0x2802, 0x812f);         /* clamp to edge */
+		glTexParameteri(GL_TEXTURE_2D, 0x2803, 0x812f);
+		glBindFramebuffer(GL_FRAMEBUFFER, chain->framebuffer[to]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, chain->level[to], 0);
+		chain->level_width[to] = w;
+		chain->level_height[to] = h;
+	}
+	source = from == 0 ? picture : chain->level[from];
+	glGetIntegerv(GL_VIEWPORT, view);
+	glGetIntegerv(GL_SCISSOR_BOX, box);
+	scissored = glIsEnabled(GL_SCISSOR_TEST);
+	blended = glIsEnabled(GL_BLEND);
+	glBindFramebuffer(GL_FRAMEBUFFER, chain->framebuffer[to]);
+	glViewport(0, 0, chain->level_width[to], chain->level_height[to]);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_BLEND);
+	glUseProgram(e->halve);
+	glBindTexture(GL_TEXTURE_2D, source);
+	glUniform2f(e->halve_texel, 1.0f / (float)(from == 0 ? chain->width : chain->level_width[from]),
+	    1.0f / (float)(from == 0 ? chain->height : chain->level_height[from]));
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	chain->made = to + 1;
+	/* back as it was */
+	glBindTexture(GL_TEXTURE_2D, picture);
+	glUseProgram(0);
+	(blended ? glEnable : glDisable)(GL_BLEND);
+	(scissored ? glEnable : glDisable)(GL_SCISSOR_TEST);
+	glScissor(box[0], box[1], box[2], box[3]);
+	glViewport(view[0], view[1], view[2], view[3]);
+	glBindFramebuffer(GL_FRAMEBUFFER, e->framebuffer);
+	glActiveTexture(GL_TEXTURE0 + e->unit);
+}
+
 static bool
 reads_what_it_writes(struct eagl *e)
 {
@@ -1380,12 +1729,15 @@ plain_program(const char *fragment, const char *what)
  * in those seconds (which is what tells the screens of a scenario apart); and with that the
  * count of each since the start.
  */
-enum { CENSUS_NOT_DRAWN, CENSUS_PLAIN, CENSUS_TABLE, CENSUS_VIBRANT, CENSUS_MASKING, CENSUS_BOX, CENSUS_KINDS };
+enum { CENSUS_NOT_DRAWN, CENSUS_PLAIN, CENSUS_TABLE, CENSUS_VIBRANT, CENSUS_MASKING, CENSUS_BOX, CENSUS_LEVEL, CENSUS_VBLUR,
+       CENSUS_KINDS };
 static const char *const census_kinds[CENSUS_KINDS] = {
 	"NOT DRAWN (no program, and no texture, or nothing of ours to draw it with, or it would read what it writes)", "drawn as the picture it is given (colour times texture)",
 	"drawn through a table (ours, for the home indicator)", "drawn with our program for a colour matrix over what is behind",
 	"drawn with our program for a colour matrix over premultiplied pixels",
 	"drawn with our program that makes a picture eight times smaller",
+	"made into a level of ours, half the size of the one before (a blur whose radius varies)",
+	"drawn with our program that reads the levels by the mask (a blur whose radius varies)",
 };
 static int census_on;
 static struct census {
@@ -1514,14 +1866,110 @@ census_report(void)
 	}
 }
 
+/* A draw of "vrb" (function 39) made with our program over the chain: true if it can be. */
 static bool
-plain_draw_begin(struct eagl *e, GLint enabled[3])
+vblur_draw_begin(struct eagl *e, struct vblur_chain *chain, GLint enabled[4])
+{
+	static const GLfloat identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+	static unsigned told;
+	int levels = chain->made < 5 ? chain->made : 5;
+
+	if (e->vblur == 0) {
+		e->vblur = vblur_program(vblur_draw_vertex, vblur_fragment, "reading the levels by the mask");
+		if (e->vblur == 0) {
+			vblur_on = 0;                   /* (better the stand-in than nothing) */
+			return false;
+		}
+		glUseProgram(e->vblur);
+		glUniform1i(glGetUniformLocation(e->vblur, "level0"), 0);
+		glUniform1i(glGetUniformLocation(e->vblur, "mask"), 1);
+		for (int k = 1; k < 5; k++) {
+			char name[8] = "levelN";
+
+			name[5] = (char)('0' + k);
+			glUniform1i(glGetUniformLocation(e->vblur, name), k + 1);
+		}
+		e->vblur_matrix = glGetUniformLocation(e->vblur, "vertex_matrix");
+		e->vblur_radius = glGetUniformLocation(e->vblur, "radius");
+		e->vblur_levels = glGetUniformLocation(e->vblur, "levels");
+		e->vblur_normalize = glGetUniformLocation(e->vblur, "normalize_edges");
+		e->vblur_paint = glGetUniformLocation(e->vblur, "paint");
+	}
+	glUseProgram(e->vblur);
+	glUniformMatrix4fv(e->vblur_matrix, 1, 0, e->matrix != NULL ? e->matrix : identity);
+	glUniform1f(e->vblur_radius, function_values[FUNCTION_VARIABLE_BLUR][0]);
+	glUniform1i(e->vblur_levels, levels);
+	glUniform1f(e->vblur_normalize, function_values[FUNCTION_VARIABLE_BLUR][1]);
+	glUniform1i(e->vblur_paint, vblur_on == 2);
+	for (int k = 1; k < 5; k++) {
+		glActiveTexture(GL_TEXTURE0 + k + 1);
+		glBindTexture(GL_TEXTURE_2D, k < chain->made ? chain->level[k] : e->bound[0]);
+	}
+	glActiveTexture(GL_TEXTURE0 + e->unit);
+	e->vblur_bound = true;
+	for (GLuint i = 0; i < 4; i++) {
+		glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled[i]);
+		if (!enabled[i]) {
+			glEnableVertexAttribArray(i);
+		}
+	}
+	if (told++ < 4) {
+		const uint8_t *at = e->arrays[3].pointer;
+		float first[2] = { 0, 0 };
+
+		if (at != NULL && e->arrays[3].type == GL_FLOAT) {
+			memcpy(first, at, sizeof(first));
+		}
+		say("redwood-gl: a blur whose radius varies, read by its mask: %d levels of texture %u (%d x %d), radius %g, numbers %g %g "
+		    "%g; the mask's coordinates at the first corner %g %g\n", levels, chain->picture, chain->width, chain->height,
+		    (double)function_values[FUNCTION_VARIABLE_BLUR][0], (double)function_values[FUNCTION_VARIABLE_BLUR][1],
+		    (double)function_values[FUNCTION_VARIABLE_BLUR][2], (double)function_values[FUNCTION_VARIABLE_BLUR][3],
+		    (double)first[0], (double)first[1]);
+	}
+	if (vblur_on == 2 && told <= 2) {
+		/* the mask itself, for the log: a pixel in every twelve, blue green red opacity */
+		uint8_t column[4 * 512];
+		GLint height = 0;
+		char said[1024];
+		size_t used = 0;
+
+		glActiveTexture(GL_TEXTURE0 + 1);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		glActiveTexture(GL_TEXTURE0 + e->unit);
+		if (height > 0 && height <= 512) {
+			if (e->reader == 0) {
+				glGenFramebuffers(1, &e->reader);
+			}
+			glBindFramebuffer(GL_FRAMEBUFFER, e->reader);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->bound[1], 0);
+			glPixelStorei(GL_PACK_ALIGNMENT, 1);
+			glReadPixels(0, 0, 1, height, GL_BGRA, GL_UNSIGNED_BYTE, column);
+			glPixelStorei(GL_PACK_ALIGNMENT, 4);
+			glBindFramebuffer(GL_FRAMEBUFFER, e->framebuffer);
+			for (GLint y = 0; y < height && used < sizeof(said) - 32; y += 12) {
+				used += (size_t)snprintf(said + used, sizeof(said) - used, " %d:%u,%u,%u,%u", y, column[4 * y], column[4 * y + 1],
+				    column[4 * y + 2], column[4 * y + 3]);
+			}
+			say("redwood-gl: the mask of the blur whose radius varies (texture %u, 1 x %d), from its first row:%s (error %#x)\n",
+			    e->bound[1], height, said, glGetError());
+		}
+	}
+	return true;
+}
+
+static bool
+plain_draw_begin(struct eagl *e, GLint enabled[4])
 {
 	static const GLfloat identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 	static uint8_t said[90];
 	unsigned function = ca_context != NULL ? *(*(uint8_t **)((char *)ca_context + 0x10) + 0x10) : 90;      /* (90: not known yet) */
 	GLint rows = 0;
 	GLuint program;
+
+	if (e->program == 0) {
+		e->line.vrd += function == FUNCTION_VARIABLE_DOWNSAMPLE;
+		e->line.vrb += function == FUNCTION_VARIABLE_BLUR;
+	}
 
 	if (e->unclear != 0 && reads_what_it_writes(e)) {
 		e->unclear = 0;
@@ -1530,7 +1978,28 @@ plain_draw_begin(struct eagl *e, GLint enabled[3])
 	if (e->program != 0) {
 		return false;
 	}
-	if (!plain_draws || (plain_draws == 1 && e->bound[0] == 0) || reads_what_it_writes(e)) {
+	if (vblur_on && reads_what_it_writes(e) && function_given[FUNCTION_VARIABLE_DOWNSAMPLE] != 0) {
+		static unsigned told;
+
+		vblur_level(e, (int)function_values[FUNCTION_VARIABLE_DOWNSAMPLE][0]);
+		census_draw(e, function, CENSUS_LEVEL);
+		if (told++ < 8) {
+			say("redwood-gl: a blur whose radius varies: level %d of texture %u made of level %d\n",
+			    (int)function_values[FUNCTION_VARIABLE_DOWNSAMPLE][0] + 1, e->bound[0],
+			    (int)function_values[FUNCTION_VARIABLE_DOWNSAMPLE][0]);
+		}
+		return false;
+	}
+	/*
+	 * Nor is any other draw with no program that would read the very texture it draws into. The
+	 * window server's snapshots end with one: function 61 ("edr", by its numbers the display's
+	 * headroom, infinite: nothing to change) over the whole picture, with that picture as its
+	 * texture. Drawn as the picture it is given, it read what the GPU had not yet written out of
+	 * its own memory -- nothing -- and wrote that over everything: every launch image SpringBoard
+	 * keeps came out black, and with it the zoom that opens an application the first time.
+	 */
+	if (!plain_draws || (plain_draws == 1 && e->bound[0] == 0) || reads_what_it_writes(e) ||
+	    (e->colour != 0 && e->colour == e->bound[0])) {
 		census_draw(e, function, CENSUS_NOT_DRAWN);
 		return false;
 	}
@@ -1579,6 +2048,14 @@ plain_draw_begin(struct eagl *e, GLint enabled[3])
 			}
 		}
 		return true;
+	}
+	if (vblur_on && e->bound[0] != 0 && e->bound[1] != 0 && function == FUNCTION_VARIABLE_BLUR && function_given[function] >= 2) {
+		struct vblur_chain *chain = vblur_chain_of(e, e->bound[0], false);
+
+		if (chain != NULL && chain->made > 0 && vblur_draw_begin(e, chain, enabled)) {
+			census_draw(e, function, CENSUS_VBLUR);
+			return true;
+		}
 	}
 	if (e->bound[0] != 0 && plain_draws != 3 && function == FUNCTION_DOWNSAMPLE_8 && function_given[function] == 8) {
 		if (e->box == 0) {
@@ -1644,12 +2121,21 @@ plain_draw_begin(struct eagl *e, GLint enabled[3])
 }
 
 static void
-plain_draw_end(struct eagl *e, const GLint enabled[3])
+plain_draw_end(struct eagl *e, const GLint enabled[4])
 {
-	for (GLuint i = 0; i < 3; i++) {
+	for (GLuint i = 0; i < 4; i++) {
 		if (!enabled[i]) {
 			glDisableVertexAttribArray(i);
 		}
+	}
+	if (e->vblur_bound) {
+		/* the textures of units 2 to 5 back as CoreAnimation had them */
+		for (unsigned k = 2; k < 6; k++) {
+			glActiveTexture(GL_TEXTURE0 + k);
+			glBindTexture(GL_TEXTURE_2D, e->bound[k]);
+		}
+		glActiveTexture(GL_TEXTURE0 + e->unit);
+		e->vblur_bound = false;
 	}
 	glUseProgram(0);
 	if (e->blended) {
@@ -1725,7 +2211,7 @@ static void
 my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 {
 	struct eagl *e = context;
-	GLint enabled[3];
+	GLint enabled[4] = { 1, 1, 1, 1 };
 	bool plain;
 
 	EAGL_ENTER(e, 0x210);
@@ -1757,7 +2243,7 @@ static void
 my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
 	struct eagl *e = context;
-	GLint enabled[3];
+	GLint enabled[4] = { 1, 1, 1, 1 };
 	bool plain;
 
 	EAGL_ENTER(e, 0x220);
@@ -1794,6 +2280,7 @@ my_glFinish(void *context)
 	if (eagl_tracing) {
 		eagl_trace("glFinish()\n");
 	}
+	clear_now(e);
 	glFinish();
 	frame_end(e, true);
 	EAGL_LEAVE(e, 0x2d0);
@@ -1809,6 +2296,7 @@ my_glFlush(void *context)
 	if (eagl_tracing) {
 		eagl_trace("glFlush()\n");
 	}
+	clear_now(e);
 	began = now_us();
 	glFlush();
 	e->flushing += now_us() - began;
@@ -1825,6 +2313,7 @@ my_glFinishObjectAPPLE(void *context, GLenum object, GLint name)
 	(void)object;
 	(void)name;
 	EAGL_ENTER(e, 0xeb8);
+	clear_now(e);
 	glFinish();
 	frame_end(e, true);
 	EAGL_LEAVE(e, 0xeb8);
@@ -1836,8 +2325,10 @@ my_glDeleteTextures(void *context, GLsizei n, const GLuint *textures)
 	struct eagl *e = context;
 
 	EAGL_ENTER(e, 0x1e0);
+	clear_now(e);
 	for (GLsizei i = 0; i < n; i++) {
 		image_forget(e, textures[i]);
+		vblur_forget(e, textures[i]);
 		if (textures[i] == e->colour) {
 			e->colour = 0;          /* (a texture that is deleted leaves the framebuffer bound) */
 		}
@@ -1912,7 +2403,14 @@ my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsiz
 			    half[4 * (width - 1)], half[4 * (width - 1) + 1], half[4 * (width - 1) + 2], half[4 * (width - 1) + 3]);
 		}
 	}
+	clear_now(e);
+	uint64_t began = slow_calls_us != 0 ? now_us() : 0;
 	glTexImage2D(target, level, (GLint)internal_format((GLenum)internal, format), width, height, border, format, type, pixels);
+	if (began != 0 && now_us() - began >= slow_calls_us) {
+		/* (with glslow=US: which pictures take long to hand over) */
+		say("tl: slow-tex %dx%d level %d format %#x type %#x%s %llu at %llu\n", width, height, level, format, type,
+		    pixels ? "" : " (empty)", now_us() - began, began);
+	}
 	EAGL_LEAVE(e, 0x970);
 }
 
@@ -1973,6 +2471,7 @@ my_glFramebufferTexture2D(void *context, GLenum target, GLenum attachment, GLenu
 	struct eagl *e = context;
 
 	EAGL_ENTER(e, 0x1530);
+	clear_now(e);
 	if (attachment == GL_COLOR_ATTACHMENT0 && target != GL_READ_FRAMEBUFFER) {
 		e->colour = texture;
 	}
@@ -1989,6 +2488,7 @@ my_glDeleteFramebuffers(void *context, GLsizei n, const GLuint *framebuffers)
 	struct eagl *e = context;
 
 	EAGL_ENTER(e, 0x1510);
+	clear_now(e);
 	for (GLsizei i = 0; i < n; i++) {
 		if (framebuffers[i] == e->framebuffer) {
 			e->framebuffer = e->colour = 0;
@@ -2309,6 +2809,7 @@ my_texImageIOSurface(id self, SEL selector, IOSurfaceRef surface, unsigned long 
 		return NO;
 	}
 	eagl_enter(e, 0);
+	clear_now(e);
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
 	if (target != GL_TEXTURE_2D || texture == 0 || (image = image_new(e, (GLuint)texture, surface)) == NULL) {
 		say("redwood-gl: -texImageIOSurface: target %#lx, texture %d: not done\n", target, texture);
@@ -2357,6 +2858,7 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 		return NO;
 	}
 	eagl_enter(e, 0);
+	clear_now(e);
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
 	pixels = IOSurfaceGetPixelFormat(surface);
 	if (target != GL_TEXTURE_2D || texture == 0 || (pixels != 'BGRA' && pixels != 0) ||
@@ -2505,7 +3007,13 @@ install(void)
 		}
 		all_shaders = strstr(arguments, "glshaders=1") != NULL;
 		census_on = strstr(arguments, "glcensus=1") != NULL;
+		frame_lines = strstr(arguments, "glframes=1") != NULL;
+		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
+		if ((argument = strstr(arguments, "glslow=")) != NULL) {
+			slow_calls_us = strtoull(argument + 7, NULL, 10);
+		}
 		full_precision = strstr(arguments, "glprecision=0") == NULL;
+		vblur_on = strstr(arguments, "vblur=0") != NULL ? 0 : strstr(arguments, "vblur=2") != NULL ? 2 : 1;
 		if ((argument = strstr(arguments, "glplain=")) != NULL) {
 			plain_draws = (int)strtoul(argument + 8, NULL, 10);
 		}

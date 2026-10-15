@@ -214,7 +214,10 @@ def build_chunked(root, block, output, level, zstd=False):
     files = [n for n in nodes if stat.S_ISREG(n.mode)]
     raw_total = 0
 
-    with open(output, 'wb') as out, concurrent.futures.ProcessPoolExecutor() as pool:
+    workers = int(os.environ.get('PACK_JOBS', min(4, os.cpu_count() or 2)))
+    if workers < 1:
+        raise ValueError('PACK_JOBS must be positive')
+    with open(output, 'wb') as out, concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
         out.seek(data_off)
         # in order, a bounded number of files ahead of the writer (the big ones are 100 MB each)
         pending = []
@@ -225,7 +228,7 @@ def build_chunked(root, block, output, level, zstd=False):
             if node is not None:
                 pending.append((node, pool.submit(chunked_extent, (node.source, level, zstd))))
 
-        for _ in range(2 * (os.cpu_count() or 2)):
+        for _ in range(2 * workers):
             submit()
         while pending:
             node, future = pending.pop(0)

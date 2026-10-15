@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <notify.h>
 #include <objc/runtime.h>
 #include <pthread.h>
@@ -627,6 +628,20 @@ send_button(IOHIDServiceClientRef buttons, const struct redwood_touch *t)
 	CFRelease(event);
 }
 
+/*
+ * Boot-arg touch_lat=1: a line for every touch sample, "tl: i TYPE posted US read US sent US" -- when
+ * the kernel stamped it, when this thread had it, when the event system had the event -- in
+ * microseconds of mach_absolute_time, the kernel's own time (tools/latency.py).
+ */
+static bool touch_latency;
+static mach_timebase_info_data_t timebase;
+
+static uint64_t
+micros(uint64_t absolute)
+{
+	return absolute * timebase.numer / timebase.denom / 1000;
+}
+
 static void *
 input_thread(__unused void *arg)
 {
@@ -638,6 +653,15 @@ input_thread(__unused void *arg)
 	int device;
 
 	pthread_setname_np("redwood input");
+	{
+		char arguments[1024] = "";
+		size_t size = sizeof(arguments) - 1;
+
+		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+			touch_latency = strstr(arguments, "touch_lat=1") != NULL;
+		}
+		mach_timebase_info(&timebase);
+	}
 	device = open(REDWOOD_TOUCH_DEVICE, O_RDONLY);
 	if (device < 0) {
 		say("redwood: input: %s: %s\n", REDWOOD_TOUCH_DEVICE, strerror(errno));
@@ -667,6 +691,8 @@ input_thread(__unused void *arg)
 	}
 
 	while (read(device, &t, sizeof(t)) == (ssize_t)sizeof(t)) {
+		uint64_t read_at = mach_absolute_time();
+
 		if (count++ < 4) {
 			say("redwood: input: sample type %u finger %u at %u %u\n", t.type, t.finger, t.x, t.y);
 		}
@@ -691,6 +717,10 @@ input_thread(__unused void *arg)
 			}
 		} else {
 			send_touch(screen, &t);
+			if (touch_latency) {
+				say("tl: i %u posted %llu read %llu sent %llu\n", t.type, micros(t.time), micros(read_at),
+				    micros(mach_absolute_time()));
+			}
 		}
 	}
 	say("redwood: input: %s: %s\n", REDWOOD_TOUCH_DEVICE, strerror(errno));
@@ -801,6 +831,40 @@ redwood_init(void)
 	}
 	slide = (uintptr_t)cache - CACHE_BASE;
 	if (strcmp(name, "backboardd") == 0) {
+		char arguments[1024] = "";
+		size_t size = sizeof(arguments) - 1;
+
+		/*
+		 * Boot-arg ca_vbl=1: CoreAnimation's frame clock from the display driver's refresh
+		 * notifications. QuartzCore takes them (IOMobileFramebufferEnableVSyncNotifications) only on
+		 * the phones with an A7 to A10, or when CA_FORCE_TIMER is in the environment
+		 * (CADeviceUseVBL()); on the iPhone X it runs a timer of its own instead (CADisplayTimer),
+		 * whose phase it would set from the frame timings of a display driver this one is not.
+		 */
+		if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0 && strstr(arguments, "ca_vbl=1") != NULL) {
+			setenv("CA_FORCE_TIMER", "1", 1);
+			say("redwood: ca_vbl=1: CoreAnimation is to take the display driver's refresh notifications\n");
+		}
+		/*
+		 * Boot-arg caenv=NAME=VALUE (as many as wanted): into the window server's environment, for
+		 * CoreAnimation's own switches (CA_LOG_TRIPLE_BUFFERING=1, CA_FORCE_DOUBLE_BUFFERING=1 ...).
+		 */
+		for (const char *argument = arguments; (argument = strstr(argument, "caenv=")) != NULL; argument += 6) {
+			char setting[128];
+			size_t length = strcspn(argument + 6, " ");
+			char *equals;
+
+			if ((argument != arguments && argument[-1] != ' ') || length == 0 || length >= sizeof(setting)) {
+				continue;
+			}
+			memcpy(setting, argument + 6, length);
+			setting[length] = 0;
+			if ((equals = strchr(setting, '=')) != NULL) {
+				*equals = 0;
+				setenv(setting, equals + 1, 1);
+				say("redwood: caenv: %s=%s for the window server\n", setting, equals + 1);
+			}
+		}
 		opengl_es();
 		window_server_fixes();
 		/*

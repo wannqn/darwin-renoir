@@ -656,3 +656,58 @@ pairwise, в том числе когда group cipher TKIP.
 Wi-Fi → ⓘ); это отдельная настройка от kernel wifi_file. Нельзя подменять её
 безусловным автоподключением kernel после любого ручного join: оно обходило бы
 намеренное отключение Auto-Join или Forget Network со стороны пользователя.
+
+
+## Обновление main от 15 октября 2026
+
+Выбраны изменения исходников main до 71ce107 (origin/main 5068d99 содержит
+также Redwood prebuilt). Включены blur/texture reuse и GPU buffer cache,
+билинейный вывод и очередь кадров, исправление обновления wired страниц RAMFS,
+диагностика задержек, планирование малых ядер, общий CoreAudio/virtio и ADSP/APR.
+Prebuilt ядра и загрузчика Redwood не переносились. По просьбе пользователя
+включён также 9281288: данные батареи через ChargerEx/QcomCharger своей UEFI.
+
+Сохранены драйверы Renoir: FTS, Adreno642, QCA6490 PCIe/MHI и его firmware,
+TKIP/MIC capabilities, polling вместо AHB IRQ и задержка fallback. Добавлена
+общая блокировка при выборе и включении SMMU-контекста MHI; при ошибке
+частичная настройка восстанавливается до освобождения блокировки. ADSP и Wi-Fi
+теперь сериализуют RPMh. Новый DDR vote Redwood не применяется к Renoir даже
+при явном ddr=2: этот аппаратный путь пока не проверен.
+
+ADSP Renoir использует собственные adsp.* из fw-audio/renoir, отдельный путь
+/fw-audio-renoir и границу 48 MiB от 0x86700000 (shima.dtsi), а не 64 MiB Redwood.
+Звук ещё не готов: подтверждены два TFA9873 revision0b73 вместо AW88261.
+Ветка записи/запуска AW88261 запрещена на Renoir. Android использует Probus,
+TERT_MI2S_RX, 96kHz/S24_LE, два канала и защитный алгоритм DSP. Порт этого
+тракта требует отдельной реализации; наличие общего audio HAL не означает,
+что динамики работают. Калибровка/OTP не переписываются.
+
+Упаковка исправлена: BootManager ищет точное имя loader.efi в XNUP. Образ,
+оставшийся после сторонних изменений (xnu-renoir-usb.img, 20:11), содержал
+loader, поэтому показывал логотип Silicium и перезагружался, не открывая USB.
+mkxnuimg.py теперь отвергает такое имя/отсутствие/дублирование loader.efi.
+Исправленный образ logs/xnu-renoir-upstream-usb.img успешно отвечает
+getvar board:renoir и getvar result:idle. Никакие разделы не прошивались.
+
+Проверки: existing host regression suite, battery cache ABI/повреждённые
+снимки, ADSP MDT boundaries/короткие или повреждённые сегменты и MHI rollback
+прошли; XNU/ath11k/оба loader/userland собраны. Patch проверен применением к
+чистому Apple base. QEMU SMP4/6GiB дошёл до SpringBoard; cow_test, keychain и
+MobileWiFi password test прошли. WSL завершился до сетевого теста, поэтому
+полный QEMU network pass не заявляется. Некоторые mlock-пробы cow_test
+вернули -1; тесты с IOSurface прошли. Логи qemu-upstream-renoir-20261015.log и
+qemu-upstream-renoir-checks-20261015.log.
+
+На телефоне: UEFI прочитал 86%,4153mV, USB present; XNU и SpringBoard получили
+86%, battery=1 charger=1 charging=1. Пользователь подтвердил отображение.
+Wi-Fi получил 192.168.1.186; HTTPS example.com ответил 200 за0.34s. Отдельный
+getaddrinfo/resolve вернул ошибку, поэтому DNS по всем API не объявляется
+исправленным. GPU рисует интерфейс. Лог phone-upstream-battery-network.log.
+Фактическое изменение тока и реакция на отключение/подключение USB пока
+отдельно не проверены. Успех этого запуска не доказывает работу звука или
+нативного Wi-Fi Auto-Join после выключения/включения.
+
+Сборка system.packfs теперь атомарно заменяет готовый файл после успешной
+упаковки. PACK_JOBS ограничивает параллелизм mkpackfs (по умолчанию до4;
+на этой машине использовано2), чтобы не держать сразу десятки cache-файлов
+по100MB при недостатке памяти. Firmware и секреты остаются игнорируемыми.

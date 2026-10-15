@@ -43,10 +43,10 @@ void redwood_input_init(void);
 void redwood_rpmh_lock(void);          /* APPS DRV2/TCS0 transaction; thread context only */
 void redwood_rpmh_unlock(void);
 void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
-void redwood_goodix_init(void);         /* touchscreen=1 on redwood: Goodix or FocalTech */
-void redwood_battery_init(void);        /* battery=1 on redwood: PM7250B fuel gauge */
 void renoir_fts_init(void);             /* touchscreen=1 on renoir: FocalTech FT3658U */
+void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
 void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
+void redwood_battery_init(void);        /* boot-arg battery=1: Qualcomm UEFI charger state shared by xnuloader */
 void redwood_net_init(void);            /* en0, if there is something to carry its frames: sys/redwood_net.h */
 void redwood_cpufreq_init(void);        /* boot-arg cpufreq=1: the phone's processor at full speed */
 void redwood_adreno_init(void);         /* boot-arg adreno=N: the first N steps of waking the phone's GPU */
@@ -54,6 +54,7 @@ void redwood_adreno_quiesce(void);      /* on the way back to the loader: the GP
 void redwood_adreno_stop(void);         /* before that, where the ending is no panic's: the GPU given back in order */
 void redwood_adreno_minute(void);       /* once a minute: a line about how warm the GPU is, if it is in use */
 void redwood_wifi_init(void);           /* boot-arg wifi=1: the phone's Wi-Fi; wifi_step=N: the first N steps of it */
+void redwood_adsp_init(void);           /* boot-arg adsp=1: the phone's audio DSP started and linked; adsp_step=N: the first N steps */
 void redwood_wifi_stop(void);           /* where a run ends in order: the Wi-Fi DSP, if it was started, shut down */
 int redwood_wifi_say(const char *format, ...) __printflike(1, 2);      /* a line of the Wi-Fi steps' log */
 int redwood_wifi_tell(const char *format, ...) __printflike(1, 2);     /* ... one that is said even with wifi=1 */

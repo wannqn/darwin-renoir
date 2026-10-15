@@ -49,6 +49,9 @@ extern void redwood_adreno_stop(void);
 extern void redwood_adreno_minute(void);
 extern void redwood_wifi_stop(void);
 extern void redwood_wifi_quiesce(void);
+extern void redwood_adsp_stop(void);
+extern void redwood_adsp_quiesce(void);
+extern void redwood_ddr_quiesce(void);
 void loader_checkpoint(uint64_t n);
 
 /* Also referenced from the early exception vector in start.s. */
@@ -73,6 +76,8 @@ static char     loader_log_scratch[LOADER_LOG_RING];
  */
 static uint32_t loader_log_lock;
 
+static void loader_log_put_locked(char c);
+
 void
 loader_log_putc(char c)
 {
@@ -87,7 +92,44 @@ loader_log_putc(char c)
 	for (uint32_t tries = 0; !locked && tries < 10000000; tries++) {
 		locked = os_atomic_cmpxchg(&loader_log_lock, 0, 1, acquire);
 	}
+	loader_log_put_locked(c);
+	if (locked) {
+		os_atomic_store(&loader_log_lock, 0, release);
+	}
+	__builtin_arm_wsr64("DAIF", daif);
+}
 
+/*
+ * A whole line at once, under the lock: lines written from several processors at the same time
+ * (tools/latency.py's "tl:" lines, a frame's on one and a touch's on another) are not mixed up.
+ */
+void loader_log_line(const char *line);
+
+void
+loader_log_line(const char *line)
+{
+	uint64_t daif;
+	bool locked = false;
+
+	daif = __builtin_arm_rsr64("DAIF");
+	__builtin_arm_wsr("DAIFSet", DAIFSC_IRQF | DAIFSC_FIQF);
+	for (uint32_t tries = 0; !locked && tries < 10000000; tries++) {
+		locked = os_atomic_cmpxchg(&loader_log_lock, 0, 1, acquire);
+	}
+	for (; *line != 0; line++) {
+		if (*line != '\r') {
+			loader_log_put_locked(*line);
+		}
+	}
+	if (locked) {
+		os_atomic_store(&loader_log_lock, 0, release);
+	}
+	__builtin_arm_wsr64("DAIF", daif);
+}
+
+static void
+loader_log_put_locked(char c)
+{
 	if (loader_log_linear || loader_log_len < LOADER_LOG_HEAD) {
 		if (loader_log_len < LOADER_LOG_SIZE) {
 			loader_log[loader_log_len++] = c;
@@ -102,11 +144,6 @@ loader_log_putc(char c)
 			loader_log_len = LOADER_LOG_HEAD + loader_log_ring_at;
 		}
 	}
-
-	if (locked) {
-		os_atomic_store(&loader_log_lock, 0, release);
-	}
-	__builtin_arm_wsr64("DAIF", daif);
 }
 
 /* Oldest first: the head, a note about what was dropped, then the ring from its oldest character. */
@@ -153,6 +190,8 @@ struct loader_live {
 	uint64_t log_head, log_ring;    /* sizes of the two parts */
 	const uint64_t *recording;      /* loader_recording: { physical address, length } of a screen recording */
 	volatile uint64_t stop;         /* the loader's to write: the host has asked for the run to end */
+	uint64_t magic2;                /* "XNULIVE2": what follows is there (a loader may meet an older kernel) */
+	const uint64_t *sound;          /* loader_sound: the same for a recording of the sound */
 };
 
 /*
@@ -160,11 +199,14 @@ struct loader_live {
  * loader to hand to the host once the kernel is back. { physical address, bytes, kernel address }.
  */
 uint64_t loader_recording[3];
+/* ... and of the sound (/dev/redwood-audio makes one with boot-arg rec_sound). */
+uint64_t loader_sound[3];
 
 struct loader_live loader_live = {
 	.magic = 0x214556494c554e58ULL, .log = loader_log, .log_len = &loader_log_len, .log_ring_at = &loader_log_ring_at,
 	.log_wrapped = &loader_log_wrapped, .log_head = LOADER_LOG_HEAD, .log_ring = LOADER_LOG_RING,
 	.recording = loader_recording,
+	.magic2 = 0x324556494c554e58ULL, .sound = loader_sound,
 };
 
 /* Valid from the first instruction of C code: does not depend on gVirtBase/gPhysBase being set up. */
@@ -229,6 +271,11 @@ loader_jump(uint64_t reason, uint64_t code)
 	}
 	__asm__ volatile ("dc cvac, %0" : : "r" ((uintptr_t)loader_recording));
 	__asm__ volatile ("dc cvac, %0" : : "r" ((uintptr_t)loader_recording + 16));
+	for (uintptr_t p = loader_sound[2] & ~63UL; p < loader_sound[2] + loader_sound[1]; p += 64) {
+		__asm__ volatile ("dc cvac, %0" : : "r" (p));
+	}
+	__asm__ volatile ("dc cvac, %0" : : "r" ((uintptr_t)loader_sound));
+	__asm__ volatile ("dc cvac, %0" : : "r" ((uintptr_t)loader_sound + 16));
 	__asm__ volatile ("dsb sy");
 
 	register uint64_t r_ttbr0 __asm__("x0") = static_kvtophys(loader_l1);
@@ -318,6 +365,8 @@ loader_return(void)
 #endif
 	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
 	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
+	redwood_adsp_quiesce();         /* nor the audio DSP */
+	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
 	/*
 	 * A panic's text is first collected in the panic buffer and only later
 	 * flushed to the console; if the console itself is what failed, that
@@ -378,6 +427,7 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
 	if (!as_panic) {
 		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
 		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
+		redwood_adsp_stop();            /* and the audio DSP */
 	}
 	if (PE_parse_boot_argn("return_cpu", &cpu, sizeof(cpu)) && cpu <= (uint32_t)ml_get_max_cpu_number() &&
 	    cpu_xcall((int)cpu, loader_return_test, (void *)(uintptr_t)(as_panic ? 2 : 1)) == KERN_SUCCESS) {
@@ -422,6 +472,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		}
 		redwood_adreno_stop();
 		redwood_wifi_stop();
+		redwood_adsp_stop();
 		loader_return();
 	}
 	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);

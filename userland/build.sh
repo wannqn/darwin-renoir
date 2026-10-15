@@ -10,9 +10,6 @@
 #                      JOBS="..."   labels of the stock iOS launchd jobs to load (default: IOS_JOBS)
 #                      REST=1       ... and the rest of them, started only when asked for (see mkjobs.py)
 #                      WIFID=1      ... and wifid, iOS's Wi-Fi daemon (see below at IOS_JOBS)
-#                      HACKIOS_PANE=1  an entry "HackiOS" in Settings' main list and a pane of ours behind it, the
-#                                   way tweaks add theirs (src/inject_prefs.m, src/hackios_pane.m, hackios/); not
-#                                   yet in every image
 #                      OSLOG="..."  labels of the jobs whose os_log output goes to the console ("all": every
 #                                   one of JOBS; default: only the window server, which says little)
 #                      INJECT="..." the programs started with a library of ours, "LIBRARY NAME..." per line
@@ -33,6 +30,10 @@
 #                                   and nothing changes (src/inject.c, opengl_es()).
 #                                   GL=test: only the library and bin/gl_test (a triangle, src/gl_test.c;
 #                                   RC_JOBS=rc.jobs.gltest runs it); the window server stays as it is.
+#                      ADSP=1       with the audio DSP's firmware from ../fw-audio in fw/ (20 MB; for the
+#                                   kernel's adsp_step=N, bsd/dev/redwood_adsp.c, which runs before the root is
+#                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
+#                                   the kernel. adsp=1 needs none of it: the system image has the firmware in /fw.
 #   system.packfs    the system image, the root filesystem (second RAM disk, /dev/md1): the part of
 #                    iOS 16.5 chosen by ../ios165/select-system.py at its real paths, the dyld
 #                    shared cache, and src/stage0.c as /sbin/launchd (the real one is
@@ -69,7 +70,7 @@ IOS_JOBS=${JOBS-"
 "}
 # WIFID=1: iOS's own Wi-Fi daemon as well, for Settings to have a Wi-Fi to show: the kernel answers it in
 # bsd/dev/redwood_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
-# networks the radio hears. NOT FINISHED: a network cannot be joined from Settings yet.
+# networks the radio hears. Manual Settings join works on Renoir; native Auto-Join remains under investigation.
 if [ -n "$WIFID" ]; then
 	if [ ! -f ../xnu/files/bsd/dev/redwood_apple80211.c ] || [ ! -f ../xnu/files/bsd/sys/redwood_sta.h ]; then
 		echo "build.sh: WIFID requires redwood_apple80211.c and redwood_sta.h, absent from upstream b1616f7" >&2
@@ -82,8 +83,7 @@ fi
 # libredwood-media.dylib).
 INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system
 /redwood/lib/libredwood-sb.dylib SpringBoard
-/redwood/lib/libredwood-media.dylib mediaserverd
-/redwood/lib/libredwood-prefs.dylib Preferences"}
+/redwood/lib/libredwood-media.dylib mediaserverd"}
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -120,8 +120,11 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -framework CoreFoundation -o obj/svc_test src/svc_test.c
 		$DYN -Wno-four-char-constants -framework CoreFoundation -framework IOSurface -o obj/surf_test src/surf_test.c
 		$DYN -o obj/rwtouch src/rwtouch.c
+		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c
 		$DYN -framework CoreFoundation -lMobileGestalt -o obj/mg_test src/mg_test.c
 		$DYN -o obj/cpu_test src/cpu_test.c
+		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
+		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
 		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
 		# (the keychain answers only a program that has a keychain access group: signed with one, if ldid is there)
 		$DYN -framework CoreFoundation -framework Security -o obj/keychain_test src/keychain_test.c &&
@@ -138,40 +141,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			-o obj/libredwood-sb.dylib src/inject_sb.c
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-media.dylib -framework CoreFoundation -lobjc \
 			-o obj/libredwood-media.dylib src/inject_media.c
-		if [ -n "$HACKIOS_PANE" ]; then
-			# the loader of Settings' entries, as PreferenceLoader is on a jailbroken phone (src/inject_prefs.m) ...
-			$DYN -dynamiclib -install_name /redwood/lib/libredwood-prefs.dylib -fobjc-arc \
-				-F${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks -framework Preferences \
-				-framework UIKit -framework Foundation -o obj/libredwood-prefs.dylib src/inject_prefs.m
-			# ... and the HackiOS pane, a preference bundle as tweaks ship theirs; the build it says it is: the
-			# repository's commit and its date (and whether the tree had changes)
-			build="HackiOS $(git -C .. rev-parse --short HEAD 2>/dev/null || echo ?) of $(git -C .. log -1 --format=%cd \
-				--date=short 2>/dev/null)$(git -C .. diff --quiet HEAD 2>/dev/null || echo ', with changes')"
-			rm -rf obj/HackiOS.bundle && mkdir -p obj/HackiOS.bundle
-			$DYN -bundle -fobjc-arc -DHACKIOS_BUILD="\"$build\"" \
-				-F${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks -framework Preferences \
-				-framework UIKit -framework Foundation -framework SystemConfiguration -o obj/HackiOS.bundle/HackiOS \
-				src/hackios_pane.m
-			cp hackios/Info.plist hackios/Root.plist obj/HackiOS.bundle/
-			# its icon: a glyph of our own, drawn here (no artwork of Apple's)
-			python3 -c '
-import sys
-from PIL import Image, ImageDraw, ImageFont
-for scale, name in ((1, "icon.png"), (2, "icon@2x.png"), (3, "icon@3x.png")):
-    size = 29 * scale
-    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=6.5 * scale, fill=(36, 41, 56, 255))
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 19 * scale)
-    except OSError:
-        font = ImageFont.load_default()
-    draw.text((size / 2, size / 2), "H", font=font, fill=(255, 255, 255, 255), anchor="mm")
-    image.save(sys.argv[1] + "/" + name)
-' obj/HackiOS.bundle
-		else
-			rm -rf obj/libredwood-prefs.dylib obj/HackiOS.bundle
-		fi
+		# the output device of the audio server: a plug-in for CoreAudio's HAL
+		$DYN -bundle -framework CoreFoundation -o obj/RedwoodAudio src/audio_plugin.c
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
@@ -188,19 +159,20 @@ for scale, name in ((1, "icon.png"), (2, "icon@2x.png"), (3, "icon@3x.png")):
 	fi
 	cp obj/hello_dyn obj/svc_test obj/surf_test obj/rwtouch obj/mg_test root/bin/
 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
+	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
+	[ -f obj/snap_test ] && cp obj/snap_test root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
+	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	for f in $EXTRA; do cp "$f" root/bin/; done
 	mkdir -p root/lib
 	cp obj/libredwood.dylib obj/libredwood-sb.dylib root/lib/
 	[ -f obj/libredwood-media.dylib ] && cp obj/libredwood-media.dylib root/lib/     # (as with cpu_test)
-	rm -rf root/lib/libredwood-prefs.dylib root/Library/PreferenceLoader root/Library/PreferenceBundles
-	if [ -f obj/libredwood-prefs.dylib ] && [ -d obj/HackiOS.bundle ]; then
-		cp obj/libredwood-prefs.dylib root/lib/
-		mkdir -p root/Library/PreferenceLoader/Preferences root/Library/PreferenceBundles
-		cp hackios/HackiOS.plist root/Library/PreferenceLoader/Preferences/
-		cp -r obj/HackiOS.bundle root/Library/PreferenceBundles/
+	if [ -f obj/RedwoodAudio ]; then
+		mkdir -p root/lib/RedwoodAudio.driver
+		cp obj/RedwoodAudio root/lib/RedwoodAudio.driver/
+		cp src/audio_plugin.plist root/lib/RedwoodAudio.driver/Info.plist
 	fi
 	if [ -n "$GL" ]; then
 		cp obj/libOSMesa.8.dylib root/lib/
@@ -258,6 +230,17 @@ rm -f root/fw/network
 if [ -f ../fw-wifi/network ]; then
 	install -m 0600 ../fw-wifi/network root/fw/network
 fi
+# ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (bsd/dev/redwood_adsp.c):
+# adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
+# the loader takes.
+if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] root/fw/
+fi
+if [ -n "$ADSP" ] && [ -f ../fw-audio/renoir/adsp.mdt ]; then
+	mkdir -p root/fw-audio-renoir
+	install -m 0644 ../fw-audio/renoir/adsp.mdt ../fw-audio/renoir/adsp.b0[2-9] ../fw-audio/renoir/adsp.b[1-9][0-9] root/fw-audio-renoir/
+fi
 ../mkpackfs.py -o root.packfs root
 
 # --- the system image -----------------------------------------------------------------------------
@@ -278,6 +261,27 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	fi
 	mv sysroot/sbin/launchd sysroot/sbin/launchd.ios
 	cp obj/stage0 sysroot/sbin/launchd
+	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
+	# it once the root is mounted (bsd/dev/redwood_adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
+	if [ -f ../fw-audio/adsp.mdt ]; then
+		mkdir -p sysroot/fw
+		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
+	fi
+	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/redwood_speaker.c,
+	# for sound=3): Android's own register values, which are not in the repository either
+	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
+		mkdir -p sysroot/fw
+		cp ../fw-audio/aw882xx_acf.bin sysroot/fw/
+	fi
+	# Renoir uses NXP TFA9873 amplifiers; never substitute Redwood's Awinic profile.
+	if [ -f ../fw-audio/renoir/adsp.mdt ]; then
+		mkdir -p sysroot/fw-audio-renoir
+		cp ../fw-audio/renoir/adsp.mdt ../fw-audio/renoir/adsp.b0[2-9] ../fw-audio/renoir/adsp.b[1-9][0-9] sysroot/fw-audio-renoir/
+		[ ! -f ../fw-audio/renoir/tfa98xx.cnt ] || cp ../fw-audio/renoir/tfa98xx.cnt sysroot/fw-audio-renoir/
+	fi
+	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
+	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
+	ln -s /redwood/lib/RedwoodAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/RedwoodAudio.driver
 	# the OS cryptex: on a device a separate volume grafted at /System/Cryptexes/OS. It holds the dyld
 	# shared cache (dyld looks there first) and a few libraries and resources outside the cache.
 	mkdir -p sysroot/System/Cryptexes
@@ -293,6 +297,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# ZSTD=1 compresses with Zstandard instead (a quarter smaller again, slower to build and to read),
 	# PLAIN=1 builds the image uncompressed
 	if [ -n "$PLAIN" ]; then pack="-b 4096 -a 16384"; elif [ -n "$ZSTD" ]; then pack="--zstd"; else pack="-z"; fi
-	../mkpackfs.py $pack -m $IOS/system.manifest -o system.packfs sysroot
+	../mkpackfs.py $pack -m $IOS/system.manifest -o system.packfs.new sysroot
+	mv -f system.packfs.new system.packfs
 	rm -rf sysroot
 fi

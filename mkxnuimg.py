@@ -12,7 +12,7 @@ or, when there is none, from prebuilt/uefi/.
 
 usage: mkxnuimg.py [-p payload.bin] [-o out.img]
 """
-import argparse, gzip, os, subprocess, sys
+import argparse, gzip, os, struct, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MU = os.path.join(HERE, 'Mu-Silicium')
@@ -59,6 +59,19 @@ if args.payload:
     data = open(args.payload, 'rb').read()
     # the payload file is a complete "XNUP" container (see xnuloader/mkpayload.py)
     assert data[:4] == b'XNUP' and len(data) <= PAYLOAD_MAX - 0x1000, 'bad or oversized payload'
+    # BootManagerLib/XnuLoader.c dispatches by this exact entry name.
+    cursor, loaders = 8, 0
+    while cursor + 24 <= len(data):
+        name, size, reserved = struct.unpack_from('<16sII', data, cursor)
+        name = name.split(b'\0', 1)[0]
+        if not name:
+            break
+        if cursor + 24 + size > len(data):
+            ap.error('truncated payload entry')
+        loaders += name == b'loader.efi'
+        cursor += 24 + ((size + 15) & ~15)
+    if loaders != 1:
+        ap.error('phone payload requires exactly one loader.efi entry; use loader.efi=PATH (not loader=PATH)')
     blob += data
     blob += b'\0' * (-len(blob) % 16)
     print(f'payload: {len(data)} bytes, bytesum={sum(data) & 0xffffffff:08x}')

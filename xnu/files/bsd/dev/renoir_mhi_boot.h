@@ -91,8 +91,22 @@ renoir_mhi_quiesce(void)
 	renoir_bhi_cleanup(false);
 }
 
+static bool renoir_bhi_prepare_locked(const uint8_t *firmware, uint32_t size, bool full);
+
 static bool
 renoir_bhi_prepare(const uint8_t *firmware, uint32_t size, bool full)
+{
+	bool ok;
+	/* Claim/program a free SMMU context atomically with the audio DMA path. */
+	lck_mtx_lock(&redwood_smmu_lock);
+	ok = renoir_bhi_prepare_locked(firmware, size, full);
+	if (!ok) renoir_bhi_cleanup(false); /* restore a partial claim before another user can find it */
+	lck_mtx_unlock(&redwood_smmu_lock);
+	return ok;
+}
+
+static bool
+renoir_bhi_prepare_locked(const uint8_t *firmware, uint32_t size, bool full)
 {
 	if (!renoir_bhi.parf || !renoir_bhi.tlmm || !radio_space_find()) { return false; }
 	if (rd(apps_smmu_context.base+SMMU_CB_FSR)&SMMU_FSR_ALL) { return false; }

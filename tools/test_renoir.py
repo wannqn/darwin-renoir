@@ -66,11 +66,42 @@ class RenoirTests(unittest.TestCase):
         self.assertEqual(gzip.decompress(kernel[:-len(b'renoir-dtb-fixture')]),
                          b'shim' + bytes(0x200000))
 
+    def test_loader_entry_must_match_uefi_dispatch(self):
+        import struct
+        # Wrong entry name used by the broken RAM image must fail before output.
+        mu = self.root / 'Mu-Silicium'
+        fv = mu / 'Build/renoirPkg/RELEASE_CLANGPDB/FV'
+        fv.mkdir(parents=True)
+        (mu / '.xnu-device').write_text('renoir\n')
+        (fv / 'SILICIUM_UEFI.fd').write_bytes(bytes(0x200000))
+        shim = mu / 'BootShim'
+        shim.mkdir()
+        (shim / 'Makefile').write_text('all:\n\tprintf shim > BootShim.bin\n')
+        dtbs = mu / 'Resources/DTBs'
+        dtbs.mkdir(parents=True)
+        (dtbs / 'renoir.dtb').write_bytes(b'renoir-dtb-fixture')
+        scripts = mu / 'Resources/Scripts'
+        scripts.mkdir()
+        shutil.copy(REPO / 'prebuilt/uefi/mkbootimg.py', scripts)
+        (mu / 'Resources/ramdisk').write_bytes(b'ramdisk')
+        payload = self.root / 'payload.bin'
+        def container(name):
+            body = struct.pack('<16sII', name, 16, 0) + bytes(16) + bytes(24)
+            return struct.pack('<II', 0x50554e58, len(body)) + body
+        payload.write_bytes(container(b'loader'))
+        result = self.pack('--device', 'renoir', '-p', str(payload))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('requires exactly one loader.efi entry', result.stderr)
+        self.assertFalse((self.root / 'xnu-renoir.img').exists())
+        payload.write_bytes(container(b'loader.efi'))
+        result = self.pack('--device', 'renoir', '-p', str(payload))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_board_property_is_fail_closed(self):
         # Compile the actual kernel helper with a DT provider. Test absent,
         # truncated and unterminated firmware properties as well as both boards.
         source = (REPO / 'xnu/files/bsd/dev/redwood_input.c').read_text()
-        helper = source[source.index('bool\nredwood_board_is'):source.index('static LCK_GRP_DECLARE')]
+        helper = source[source.index('bool\nredwood_board_is'):source.index('/*\n * Boot-arg touch_lat=1:', source.index('bool\nredwood_board_is'))]
         program = r'''
 #include <stdbool.h>
 #include <string.h>
