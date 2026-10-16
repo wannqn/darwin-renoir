@@ -718,3 +718,16 @@ getaddrinfo/resolve вернул ошибку, поэтому DNS по всем 
 Cold RAM boot with `adsp=1 speaker_probe=2 battery=1` confirmed both TFA9873 IDs (`0x34`/`0x35`, revision `0x0b73`). The read-only probe restored GPIO36/37 state and did not enable amplifiers or write calibration/OTP. ADSP reached APR audio-services-ready in 4655 ms (node 5, 12 services). This confirms DSP transport, not speaker playback: the Renoir Tertiary MI2S / TFA protection path is still pending.
 
 Wi-Fi concurrently acquired `192.168.1.186`; HTTPS example.com returned 200 (577 bytes, 0.17 s). A subsequent raw resolver call succeeded; the earlier failure before CFNetwork initialization is not proven fixed. Live evidence: `logs/phone-adsp-live-20261016.log`. The phone was left running iOS without a return timer; no partition was flashed.
+
+
+### Upstream through 66a38c4 — 2026-10-16
+
+Integrated the 13 source commits after 5068d99; skipped every Redwood prebuilt, including binaries bundled with 5c64ba4. This includes sRGB device-tree advertisement for WebKit, Mesa frame-end submission, the interrupt-disabled console fix, DSP battery reporting, audio guards and the generic HAL additions. Redwood haptic, torch and microphone entry points now reject other boards; Renoir does not advertise the unported haptic/flash capabilities. Its existing GPU, FTS and PCIe/MHI Wi-Fi paths remain intact.
+
+Renoir `renoir_afe_probe=1` sends only the Tertiary MI2S configuration: RX 0x1004 / SD1 and feedback TX 0x1005 / SD0, stereo S24_LE at 96 kHz. Both were accepted by the real DSP. No clock, device-start or amplifier-enable command is sent. This is an intermediate audio-port check, not working speaker output. The correct SD1 pin is GPIO124, mux3 (not GPIO123); the GPIO switch stage is not implemented.
+
+With `adsp=1 battmgr=1` and without `battery=1`, the new battery-manager path publishes an IOPMPowerSource that powerd exposes as InternalBattery-0. The phone reported 28%, charging, design4250mAh, learnt3576mAh and420cycles. Renoir charge counter is converted from 1/100uAh according to OKX's non-BQ path; full/design capacity units remain uAh. The raw diagnostic run identified this difference before the corrected kernel was rebuilt. UEFI `battery=1` remains the alternate path and disables DSP polling.
+
+Re-extracted iOS files with KEEP=1 after the new stale-selection check caught an outdated rootfs; rebuilt the complete system image (61245 nodes). Host regressions cover Renoir hardware gates, Wi-Fi, memory rollback, TFA metadata, AFE packet ABI and charge conversion. Firmware, system images and hardware logs stay outside Git.
+
+Final hardware check with the refreshed full system: ADSP/APR ready in4757ms; both MI2S configurations accepted; HTTPS200/577B/0.15s and DNS passed. IOPMPowerSource showed27%, AppleRawCurrentCapacity965mAh, full3576mAh, design4250mAh and420cycles, confirming the corrected charge units. The user opened example.com in Safari and confirmed the page now renders instead of a black screen. The phone remains running iOS without a return timer.

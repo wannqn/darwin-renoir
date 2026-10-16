@@ -8,7 +8,7 @@ a=s.index('#define LOADER_BATTERY_MAGIC')
 b=s.index('SYSCTL_NODE',a)
 state=s[a:b]
 a=s.index('static bool\nbattery_snapshot(')
-b=s.index('static void\nbattery_thread(',a)
+b=s.index('/*\n * What the audio DSP',a)
 helper=re.sub(r'__asm__ volatile \("dmb ishld" ::: "memory"\);', '(void)0;',s[a:b])
 code="#include <stdint.h>\n#include <stdbool.h>\n#include <string.h>\n#include <assert.h>\n"+state+helper+r"""
 int main(void) {

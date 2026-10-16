@@ -8,6 +8,7 @@
 #include <libkern/libkern.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/redwood_audio.h>
 #include <sys/systm.h>
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
@@ -100,4 +101,46 @@ void renoir_tfa_init(void) {
     if(!redwood_board_is("renoir")||!PE_parse_boot_argn("speaker_probe",&on,sizeof(on))||on==0)return;
     tfa_probe_level=on;
     if(kernel_thread_start(tfa_probe,NULL,&thread)==KERN_SUCCESS)thread_deallocate(thread);
+}
+
+/* Renoir's Tertiary MI2S wire format, from OKX renoir-audio-overlay.dtsi,
+ * msm-dai-q6-v2.c and the Android mixer snapshot. Configuration only: no
+ * clocks, DEVICE_START, PCM, amplifier power or calibration writes here.
+ * RX uses SD1, TX feedback uses SD0; both are stereo S24_LE at 96 kHz.
+ */
+struct renoir_i2s_config {
+    uint32_t version;
+    uint16_t bits, line, stereo, ws_internal;
+    uint32_t rate;
+    uint16_t format, reserved;
+} __attribute__((packed));
+struct renoir_afe_config_packet {
+    uint16_t port, bytes;
+    uint32_t address_low, address_high, map_handle;
+    uint32_t module, param;
+    uint16_t size, reserved;
+    struct renoir_i2s_config config;
+} __attribute__((packed));
+_Static_assert(sizeof(struct renoir_i2s_config)==20,"AFE I2S ABI");
+_Static_assert(sizeof(struct renoir_afe_config_packet)==48,"AFE in-band ABI");
+void renoir_tfa_dsp_up(void) {
+    uint32_t probe=0;
+    if(!redwood_board_is("renoir") ||
+       !PE_parse_boot_argn("renoir_afe_probe",&probe,sizeof(probe)) || probe!=1) return;
+    for(unsigned direction=0;direction<2;direction++) {
+        struct renoir_afe_config_packet packet={
+            .port=direction ? 0x1005 : 0x1004,
+            .bytes=32,.module=0x0001020c,.param=0x0001020d,.size=20,
+            .config={.version=1,.bits=24,.line=direction ? 1 : 2,
+                     .stereo=1,.ws_internal=1,.rate=96000},
+        };
+        struct redwood_apr_answer answer={0};
+        bool replied=redwood_adsp_apr(4,0,0,0x000100ef,&packet,sizeof(packet),1000,&answer);
+        bool accepted=replied && answer.opcode==0x000110e8 && answer.length>=8 &&
+                      answer.words[0]==0x000100ef && answer.words[1]==0;
+        redwood_wifi_tell("renoir-afe: port%#x stereo S24_LE 96000 SD%u: %s (opcode%#x status%#x); NOT STARTED\n",
+            packet.port,direction ? 0 : 1,accepted ? "configuration accepted" : "configuration failed",
+            answer.opcode,answer.words[1]);
+        if(!accepted) break;
+    }
 }

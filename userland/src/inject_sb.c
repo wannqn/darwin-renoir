@@ -33,6 +33,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <dispatch/dispatch.h>
+#include <fcntl.h>
 #include <mach/mach_time.h>
 #include <notify.h>
 #include <objc/message.h>
@@ -44,6 +45,9 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+
+/* where what is said goes: the standard error, which is the console's for SpringBoard (an application's is nowhere) */
+static int say_fd = 2;
 
 static void
 say(const char *format, ...)
@@ -58,7 +62,7 @@ say(const char *format, ...)
 	if (n > (int)sizeof(line) - 1) {
 		n = sizeof(line) - 1;
 	}
-	write(2, line, (size_t)n);
+	write(say_fd, line, (size_t)n);
 }
 
 /*
@@ -209,13 +213,16 @@ snapshot_output_format(__unused id self, __unused SEL selector, id snapshot)
 
 /*
  * iOS reads battery level through UIDevice.batteryLevel and UIDevice.batteryState; SpringBoard's
- * status bar reads it the same way via SBBatteryController. There is no IOPMPowerSource kernel
- * driver yet (that is the right long-term fix), so we hook the UIDevice accessors to return what
- * xnuloader reads through Qualcomm's UEFI charger protocols and XNU publishes as
- * kern.redwood.battery_soc (0..100) and kern.redwood.battery_charging.
+ * status bar reads it the same way via SBBatteryController. Where the battery has no power source
+ * of its own in the kernel (battery=1, the loader's way through Qualcomm's UEFI charger protocols),
+ * we hook the UIDevice accessors to return what XNU publishes as kern.redwood.battery_soc (0..100)
+ * and kern.redwood.battery_charging.
  * When the sysctl is missing (battery=1 not in boot-args, or the driver never started) we hand
  * back the value the real implementation computed; the status bar then shows whatever iOS last
  * knew, which is better than crashing.
+ * With adsp=1 the battery is a power source (the service RedwoodBattery, an IOPMPowerSource:
+ * iokit/Kernel/RedwoodBattery.cpp), which powerd reads like an iPhone's own, and from it iOS knows
+ * everything by itself; once that service is there, the hooks hand everything to iOS's own code.
  */
 static float  (*original_battery_level)(id self, SEL sel);
 static long   (*original_battery_state)(id self, SEL sel);
@@ -236,13 +243,27 @@ sysctl_int(const char *name)
 	return value;
 }
 
+/* Is the battery a power source that iOS reads by itself (see above)? Once it is, it stays one. */
+static bool
+battery_power_source(void)
+{
+	static bool found;
+	io_service_t service;
+
+	if (!found && (service = IOServiceGetMatchingService(0, IOServiceMatching("RedwoodBattery"))) != 0) {
+		IOObjectRelease(service);
+		found = true;
+	}
+	return found;
+}
+
 /* UIDevice.batteryLevel: 0.0..1.0; -1.0 if monitoring not enabled */
 static float
 battery_level(id self, SEL sel)
 {
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	if (soc < 0 || soc > 100) {
+	if (soc < 0 || soc > 100 || battery_power_source()) {
 		return original_battery_level ? original_battery_level(self, sel) : -1.0f;
 	}
 	return (float)soc / 100.0f;
@@ -257,7 +278,7 @@ battery_state(id self, SEL sel)
 	int plugged = sysctl_int("kern.redwood.battery_charger_present");
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	if (charging == -1 || present == -1 || plugged == -1 || soc < 0 || soc > 100) {
+	if (charging == -1 || present == -1 || plugged == -1 || soc < 0 || soc > 100 || battery_power_source()) {
 		return original_battery_state ? original_battery_state(self, sel) : 0;
 	}
 	if (!present) return 0;
@@ -265,13 +286,17 @@ battery_state(id self, SEL sel)
 	return charging ? 2 : 1;
 }
 
-/* UIKitCore's status-bar view has its own presentation policy, separate from UIDevice. */
+/*
+ * UIKitCore's status-bar view has its own presentation policy, separate from UIDevice. With the power
+ * source it is iOS's own again: the switch Battery Percentage in Settings > Battery, which the image
+ * turns on (SBShowBatteryPercentage in userland/var/mobile/Library/Preferences/com.apple.springboard.plist).
+ */
 static BOOL
 battery_view_shows_percentage(id self, SEL sel)
 {
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	if (soc >= 0 && soc <= 100) return YES;
+	if (soc >= 0 && soc <= 100 && !battery_power_source()) return YES;
 	return original_battery_view_shows_percentage ? original_battery_view_shows_percentage(self, sel) : NO;
 }
 
@@ -280,7 +305,7 @@ battery_view_set_shows_percentage(id self, SEL sel, BOOL shows)
 {
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	original_battery_view_set_shows_percentage(self, sel, (soc >= 0 && soc <= 100) ? YES : shows);
+	original_battery_view_set_shows_percentage(self, sel, (soc >= 0 && soc <= 100 && !battery_power_source()) ? YES : shows);
 }
 
 static BOOL
@@ -290,7 +315,7 @@ battery_view_should_show_bolt(id self, SEL sel)
 	int present = sysctl_int("kern.redwood.battery_present");
 	int plugged = sysctl_int("kern.redwood.battery_charger_present");
 
-	if (charging != -1 && present != -1 && plugged != -1) return charging && present && plugged;
+	if (charging != -1 && present != -1 && plugged != -1 && !battery_power_source()) return charging && present && plugged;
 	return original_battery_view_should_show_bolt ? original_battery_view_should_show_bolt(self, sel) : NO;
 }
 
@@ -306,7 +331,7 @@ battery_view_charge_percent(id self, SEL sel)
 {
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	if (soc >= 0 && soc <= 100) return (double)soc / 100.0;
+	if (soc >= 0 && soc <= 100 && !battery_power_source()) return (double)soc / 100.0;
 	return original_battery_view_charge_percent ? original_battery_view_charge_percent(self, sel) : 0.0;
 }
 
@@ -315,7 +340,7 @@ battery_view_set_charge_percent(id self, SEL sel, double p)
 {
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	original_battery_view_set_charge_percent(self, sel, (soc >= 0 && soc <= 100) ? (double)soc / 100.0 : p);
+	original_battery_view_set_charge_percent(self, sel, (soc >= 0 && soc <= 100 && !battery_power_source()) ? (double)soc / 100.0 : p);
 }
 
 /* The big charging ring on the lock screen (CoverSheet) reads its fill level the same way. */
@@ -324,7 +349,7 @@ ring_charging_level(id self, SEL sel)
 {
 	int soc = sysctl_int("kern.redwood.battery_soc");
 
-	if (soc >= 0 && soc <= 100) return (double)soc / 100.0;
+	if (soc >= 0 && soc <= 100 && !battery_power_source()) return (double)soc / 100.0;
 	return original_ring_charging_level ? original_ring_charging_level(self, sel) : 0.0;
 }
 
@@ -338,7 +363,7 @@ battery_post_notifications(void)
 	id center = notification_center ? ((id (*)(Class, SEL))objc_msgSend)(notification_center,
 	    sel_registerName("defaultCenter")) : nil;
 
-	if (center != nil) {
+	if (center != nil && !battery_power_source()) {
 		SEL post = sel_registerName("postNotificationName:object:");
 		((void (*)(id, SEL, id, id))objc_msgSend)(center, post,
 		    (id)CFSTR("UIDeviceBatteryLevelDidChangeNotification"), device);
@@ -645,6 +670,38 @@ layer_line(id layer, const char *role, int depth)
 	}
 }
 
+/* Every WKWebView under a view: whether WebKit takes it for one in the background, its web process and whether that answers. */
+static void
+web_views(id view, int depth)
+{
+	Class web = objc_getClass("WKWebView");
+	id subviews;
+	bool is_web = false;
+
+	if (view == NULL || depth > 40) {
+		return;
+	}
+
+	for (Class c = object_getClass(view); web != NULL && c != NULL && !is_web; c = class_getSuperclass(c)) {
+		is_web = c == web;
+	}
+	if (is_web) {
+		SEL background = sel_registerName("_isBackground"), pid = sel_registerName("_webProcessIdentifier");
+		SEL responsive = sel_registerName("_webProcessIsResponsive");
+
+		say("redwood: layers%s: a WKWebView %p: in the background %s, web process %d, responsive %s, in a window %s, hidden %s\n",
+		    layers_of, (void *)view, class_respondsToSelector(object_getClass(view), background) ?
+		    (SEND(BOOL, view, "_isBackground") ? "YES" : "no") : "?", class_respondsToSelector(object_getClass(view), pid) ?
+		    SEND(int, view, "_webProcessIdentifier") : -1, class_respondsToSelector(object_getClass(view), responsive) ?
+		    (SEND(BOOL, view, "_webProcessIsResponsive") ? "yes" : "NO") : "?", SEND(id, view, "window") ? "yes" : "NO",
+		    SEND(BOOL, view, "isHidden") ? "YES" : "no");
+	}
+	subviews = SEND(id, view, "subviews");
+	for (long i = 0; subviews != NULL && i < SEND(long, subviews, "count"); i++) {
+		web_views(SEND1(id, subviews, "objectAtIndex:", long, i), depth + 1);
+	}
+}
+
 static void
 layers(void)
 {
@@ -672,6 +729,13 @@ layers(void)
 		    scene ? text_of(SEND(id, scene, "_persistenceIdentifier")) : "none", scene ? SEND(long, scene, "activationState") : -1L);
 		layer_line(SEND(id, w, "layer"), "", 1);
 	}
+	if (application != NULL) {
+		say("redwood: layers%s: the application's state %ld (0 active, 1 inactive, 2 in the background)\n", layers_of,
+		    SEND(long, application, "applicationState"));
+	}
+	for (long i = 0; windows != NULL && i < SEND(long, windows, "count"); i++) {
+		web_views(SEND1(id, windows, "objectAtIndex:", long, i), 0);
+	}
 	say("redwood: layers%s: end\n", layers_of);
 }
 
@@ -692,6 +756,10 @@ redwood_springboard_init(void)
 
 		snprintf(who, sizeof(who), " of %s", name);
 		layers_of = who;
+		if ((say_fd = open("/dev/console", O_WRONLY | O_NOCTTY)) < 0) {
+			say_fd = 2;
+		}
+		say("redwood: in %s[%d]: its layers are said on the notification com.redwood.layers\n", name, getpid());
 		notify_register_dispatch("com.redwood.layers", &token, dispatch_get_main_queue(), ^(__unused int t) {
 			layers();
 		});

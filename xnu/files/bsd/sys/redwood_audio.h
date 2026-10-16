@@ -52,7 +52,13 @@ bool redwood_audio_volume(uint32_t *below, bool *muted, uint32_t *generation);
 void redwood_audio_init(void);
 void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
 void renoir_tfa_init(void);
+void renoir_tfa_dsp_up(void);
 void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
+void redwood_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (bsd/dev/redwood_haptic.c) */
+void redwood_haptic_quiesce(void);      /* its chip back into reset: at the run's end and on a panic's way out */
+void redwood_haptic_pretend(uint32_t peak); /* a test's stand-in for iOS's waveform: as if a write of this loudness came */
+void redwood_torch_init(void);          /* boot-arg torch=N: the phone's flashlight (bsd/dev/redwood_torch.c) */
+void redwood_torch_quiesce(void);       /* the light off: at the run's end and on a panic's way out */
 
 /*
  * The phone's speakers (bsd/dev/redwood_speaker.c): its two Awinic amplifiers, set up as
@@ -64,6 +70,33 @@ bool redwood_speaker_volume(uint32_t below, uint32_t step_ms); /* below Android'
 bool redwood_speaker_healthy(void);     /* no fault reported; on one, both are powered down at once */
 void redwood_speaker_stop(void);        /* faded out, muted, powered down, in Android's order */
 void redwood_speaker_quiesce(void);     /* powered down at once, without sleeping: on a panic's way out */
+/* the amplifiers' own temperature and battery voltage read (every second while they play): the reduction they call for */
+uint32_t redwood_speaker_monitor(bool tell);
+
+/*
+ * The speakers' guard (bsd/dev/redwood_guard.c): what the samples go through in the feeder on their
+ * way to the amplifiers, for want of the DSP's speaker protection. Levels in eighths of a dB.
+ */
+#define REDWOOD_GUARD_SILENT    0xffffffffu     /* the amplifiers are off: nothing reaches the speakers */
+struct redwood_guard_report {
+	uint32_t blocks, rms_blocks, fast_blocks, slow_blocks;  /* blocks done, and in how many each average held the level down */
+	uint32_t limited_frames;        /* frames in which the peak limiter turned the level down */
+	uint32_t peak_in, peak_out;     /* the largest sample that came in and that went out */
+	uint32_t least_peak_gain;       /* the peak limiter's least gain, in 1/65536 */
+	uint64_t least_gain, gain;      /* the power guard's (with the monitor's) least gain and the latest, Q30 */
+	uint64_t rms, fast, slow;       /* the averages now, the louder speaker's: Q30 of a full-scale square wave at Android's level */
+};
+#define REDWOOD_GUARD_MAX_GAIN  (12 * 8)        /* the most gain before the guard: 12 dB */
+void redwood_guard_configure(bool hpf, uint32_t gain);         /* the high-pass filter; `gain' before everything */
+void redwood_guard_attenuation(uint32_t below);                 /* the amplifiers' level under Android's (or REDWOOD_GUARD_SILENT):
+                                                                 * what the limits are reckoned from */
+void redwood_guard_monitor(uint32_t below);                     /* a reduction asked for by redwood_speaker_monitor() */
+void redwood_guard_process(int16_t *frames, uint32_t count);    /* stereo frames, in place */
+void redwood_guard_take_report(struct redwood_guard_report *report);   /* what happened since the last call */
+int redwood_guard_decibels(uint64_t ratio);                     /* 10 log10 of a Q30 ratio, in tenths of a dB */
+/* boot-arg rec_sound_fed=1: the recording (rec_sound=N) has what the guard let through instead of what iOS wrote */
+bool redwood_audio_recording_fed(void);
+void redwood_audio_record_fed(const int16_t *frames, uint32_t count);
 
 /*
  * The audio DSP's services, for the sound's path (bsd/dev/redwood_adsp.c, bsd/dev/redwood_sound.c).
@@ -88,6 +121,15 @@ void redwood_adsp_fw_free(const uint8_t *data, uint64_t size);
 void redwood_sound_dsp_up(void);        /* the DSP's audio services are up (adsp=1): boot-arg sound=N begins */
 void redwood_sound_dsp_down(void);      /* before the DSP is shut down at the run's end: everything of the sound's stopped */
 void redwood_sound_quiesce(void);       /* on a panic's way out: the amplifiers off, without sleeping */
+/* the microphones' part of the memory the DSP sees (redwood_sound.c): false if it cannot be had; given back with _put() */
+bool redwood_audio_dsp_memory(uintptr_t *memory, uint64_t *dsp_address, uint32_t *bytes);
+void redwood_audio_dsp_memory_put(void);
+/* a second handler of the DSP's events (the microphones'), asked when the first does not take one */
+void redwood_adsp_apr_events_second(redwood_apr_events_t handler);
+/* boot-arg rec_sound_mic=1: the recording (rec_sound=N) has what the microphone hears (given with redwood_audio_record_fed()) */
+bool redwood_audio_recording_mic(void);
+void redwood_mic_dsp_up(void);          /* the DSP's audio services are up (adsp=1): boot-arg mic=N begins */
+void redwood_mic_dsp_down(void);        /* before the DSP is shut down at the run's end: what the microphones' path asked for given back */
 #endif
 
 #endif /* _SYS_REDWOOD_AUDIO_H_ */

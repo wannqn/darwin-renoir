@@ -16,6 +16,11 @@
  *
  *                 struct rec_header, then per write: struct rec_block, frames * 4 bytes
  *
+ *               With rec_sound_fed=1 as well, the recording has instead what the speakers' guard
+ *               let through (redwood_guard.c, on the phone): what reaches the amplifiers. With
+ *               rec_sound_mic=1, what the main microphone hears (redwood_mic.c, mic=3), in both
+ *               channels.
+ *
  * When the writer has stopped, a line in the log says how long it wrote, at what rate, how much
  * of it was not silence and how loud: the only way to "hear" a machine one cannot listen to.
  * (The audio server writes for as long as its device runs, a second or two beyond the sound.)
@@ -64,6 +69,8 @@ static LCK_MTX_DECLARE(audio_lock, &audio_lck_grp);
 static redwood_audio_sink_t audio_sink;
 
 static uint8_t *rec_base;
+static bool rec_fed;                    /* boot-arg rec_sound_fed=1: what the guard let through is recorded, not what was written */
+static bool rec_mic;                    /* boot-arg rec_sound_mic=1: what the microphone hears (redwood_mic.c) */
 static uint64_t rec_size, rec_used;
 static uint64_t rec_frames, rec_frames_max;
 
@@ -140,6 +147,27 @@ audio_record(const int16_t *frames, uint32_t count)
 	}
 }
 
+bool
+redwood_audio_recording_fed(void)
+{
+	return rec_fed && rec_base != NULL && rec_frames < rec_frames_max;
+}
+
+bool
+redwood_audio_recording_mic(void)
+{
+	return rec_mic && rec_base != NULL && rec_frames < rec_frames_max;
+}
+
+/* From the speakers' feeder: what the guard let through, into the recording (rec_sound_fed=1). */
+void
+redwood_audio_record_fed(const int16_t *frames, uint32_t count)
+{
+	lck_mtx_lock(&audio_lock);
+	audio_record(frames, count);
+	lck_mtx_unlock(&audio_lock);
+}
+
 static void
 audio_play(const int16_t *frames, uint32_t count)
 {
@@ -154,7 +182,9 @@ audio_play(const int16_t *frames, uint32_t count)
 		}
 	}
 	lck_mtx_lock(&audio_lock);
-	audio_record(frames, count);
+	if (!rec_fed && !rec_mic) {
+		audio_record(frames, count);
+	}
 	if (audio_sink != NULL) {
 		taken = audio_sink(frames, count);
 		stretch_lost += count - taken;
@@ -265,7 +295,7 @@ static void
 audio_recording_init(void)
 {
 	struct rec_header *header;
-	uint32_t seconds = 0;
+	uint32_t seconds = 0, fed = 0;
 	vm_offset_t memory = 0;
 	uint64_t size;
 
@@ -295,7 +325,14 @@ audio_recording_init(void)
 	loader_sound[0] = kvtophys(memory);
 	loader_sound[1] = rec_used;
 	loader_sound[2] = (uint64_t)memory;
-	printf("redwood-audio: recording the first %u s of sound, into %llu MB at %#llx\n", seconds, size >> 20, loader_sound[0]);
+	PE_parse_boot_argn("rec_sound_fed", &fed, sizeof(fed));
+	rec_fed = fed != 0;
+	fed = 0;
+	PE_parse_boot_argn("rec_sound_mic", &fed, sizeof(fed));
+	rec_mic = fed != 0;
+	printf("redwood-audio: recording the first %u s of sound%s, into %llu MB at %#llx\n", seconds,
+	    rec_fed ? " as the speakers' guard lets it through" : rec_mic ? " the microphone hears (in both channels)" : "", size >> 20,
+	    loader_sound[0]);
 }
 
 void
@@ -312,4 +349,6 @@ redwood_audio_init(void)
 	redwood_virtio_sound_init();
 	redwood_speaker_init();
 	renoir_tfa_init();
+	redwood_haptic_init();
+	redwood_torch_init();
 }
