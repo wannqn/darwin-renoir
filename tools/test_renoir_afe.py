@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile,subprocess
 r=Path(__file__).resolve().parents[1]
 s=(r/'xnu/files/bsd/dev/renoir_tfa.c').read_text()
-s=s[s.index('struct renoir_i2s_config {'):]
+s=s[s.index('struct renoir_i2s_config {'):s.index('/* Bounded, silent')]
 code=r"""
 #include <stdint.h>
 #include <stdbool.h>
@@ -13,6 +13,7 @@ code=r"""
 struct redwood_apr_answer { uint32_t opcode,length,words[16]; };
 static bool renoir=true,enabled=true,fail=false,short_reply=false;
 static unsigned calls;
+static void renoir_afe_clock_test(void){assert(0);}
 static bool redwood_board_is(const char *s){assert(!strcmp(s,"renoir"));return renoir;}
 static bool PE_parse_boot_argn(const char *s,void *v,unsigned n){assert(!strcmp(s,"renoir_afe_probe") && n==4);*(uint32_t*)v=enabled;return true;}
 #define redwood_wifi_tell(...) ((void)0)

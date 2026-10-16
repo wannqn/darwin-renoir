@@ -731,3 +731,12 @@ With `adsp=1 battmgr=1` and without `battery=1`, the new battery-manager path pu
 Re-extracted iOS files with KEEP=1 after the new stale-selection check caught an outdated rootfs; rebuilt the complete system image (61245 nodes). Host regressions cover Renoir hardware gates, Wi-Fi, memory rollback, TFA metadata, AFE packet ABI and charge conversion. Firmware, system images and hardware logs stay outside Git.
 
 Final hardware check with the refreshed full system: ADSP/APR ready in4757ms; both MI2S configurations accepted; HTTPS200/577B/0.15s and DNS passed. IOPMPowerSource showed27%, AppleRawCurrentCapacity965mAh, full3576mAh, design4250mAh and420cycles, confirming the corrected charge units. The user opened example.com in Safari and confirmed the page now renders instead of a black screen. The phone remains running iOS without a return timer.
+
+
+### Renoir digital audio path — 2026-10-16
+
+`renoir_afe_probe=2` performed a bounded silent interface test: both amplifiers' SYS_CTRL read0x4201 (off), DSP accepted the6.144MHz clock request and RX/TX start, SCK/WS transitions were observed, and stop/clock-off/pin restoration completed. No PCM or amplifier-enable commands are sent by this mode.
+
+The shared ASM/ADM driver now accepts Renoir `sound=1/2` only, with Tertiary MI2S GPIO120/122/121/124 (mux1/1/1/3), AFE RX0x1004 and feedback TX0x1005, and audio SMMU stream0x2001. Higher sound levels are refused. Both TFA amplifiers must be confirmed off before pins are taken. The PCM stream remains stereo16bit48kHz; the AFE interface is stereo24bit96kHz.
+
+Physical `sound=2 sound_secs=3` completed: ASM/ADM opened,159 buffers sent and159 returned, zero errors/underflows, about48.4k frames/s; no reported SMMU request faults. Stream/COPP/mapping, RX/TX, clock, pins and SMMU state were released. Factory calibration was read without writes: R25C6232/7624mOhm and MTPEX set on both chips. Evidence: logs/phone-afe-clock-final.log and logs/phone-silent-stream-live.log. This validates digital transport only; TFA host protection and powered speaker output remain pending.

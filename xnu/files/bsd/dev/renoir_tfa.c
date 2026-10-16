@@ -21,6 +21,7 @@ extern kern_return_t thread_terminate(thread_t);
 static vm_offset_t tfa_tlmm;
 static uint32_t tfa_cfg[2], tfa_io[2];
 static unsigned tfa_probe_level;
+static bool tfa_probe_complete, tfa_amplifiers_off;
 static uint32_t tr(unsigned off) { return *(volatile uint32_t *)(tfa_tlmm+off); }
 static void tw(unsigned off,uint32_t value) { *(volatile uint32_t *)(tfa_tlmm+off)=value; __asm__ volatile("dsb sy" ::: "memory"); }
 static void tdelay(void) { delay_for_interval(4,NSEC_PER_USEC); }
@@ -84,14 +85,26 @@ static void tfa_probe(__unused void *arg,__unused wait_result_t result) {
         tw(TFA_CFG(pins[i]),tfa_cfg[i]&~(TFA_OE|0x3cu));
         tw(TFA_IO(pins[i]),0);
     }
+    unsigned off_count=0;
     for(unsigned i=0;i<2;i++) {
         uint16_t revision=0;
         bool ok=tget(0x34+i,3,&revision);
         redwood_wifi_tell("renoir-tfa: address%#x revision%#x %s; amplifiers not started\n",0x34+i,revision,
             !ok?"NO ACK":revision==0x0b73?"TFA9873 confirmed":"unexpected chip");
+        uint16_t control=0;
+        bool readable=ok && revision==0x0b73 && tget(0x34+i,0,&control);
+        bool off=readable && ((control&1)!=0 || (control&8)==0);
+        off_count+=off;
+        uint16_t mtp=0,re25=0;
+        bool calibrated=readable && tget(0x34+i,0xf0,&mtp) && tget(0x34+i,0xf5,&re25) && (mtp&2)!=0;
+        redwood_wifi_tell("renoir-tfa: address%#x factory calibration MTP%#x R25C%u mOhm %s (read only)\n",
+            0x34+i,mtp,re25,calibrated && re25>=2000 && re25<=20000 ? "valid" : "NOT CONFIRMED");
+        redwood_wifi_tell("renoir-tfa: address%#x SYS_CTRL%#x %s\n",0x34+i,control,off ? "amplifier off" : "off state NOT CONFIRMED");
     }
     /* Restore latch before mux/output direction; avoid an unintended pulse. */
     for(unsigned i=0;i<2;i++) {tw(TFA_IO(pins[i]),tfa_io[i]&2);tw(TFA_CFG(pins[i]),tfa_cfg[i]);}
+    tfa_amplifiers_off=off_count==2;
+    tfa_probe_complete=true;
 done:
     thread_terminate(current_thread());
 }
@@ -108,6 +121,7 @@ void renoir_tfa_init(void) {
  * clocks, DEVICE_START, PCM, amplifier power or calibration writes here.
  * RX uses SD1, TX feedback uses SD0; both are stereo S24_LE at 96 kHz.
  */
+static void renoir_afe_clock_test(void);
 struct renoir_i2s_config {
     uint32_t version;
     uint16_t bits, line, stereo, ws_internal;
@@ -126,7 +140,7 @@ _Static_assert(sizeof(struct renoir_afe_config_packet)==48,"AFE in-band ABI");
 void renoir_tfa_dsp_up(void) {
     uint32_t probe=0;
     if(!redwood_board_is("renoir") ||
-       !PE_parse_boot_argn("renoir_afe_probe",&probe,sizeof(probe)) || probe!=1) return;
+       !PE_parse_boot_argn("renoir_afe_probe",&probe,sizeof(probe)) || (probe<1 || probe>2)) return;
     for(unsigned direction=0;direction<2;direction++) {
         struct renoir_afe_config_packet packet={
             .port=direction ? 0x1005 : 0x1004,
@@ -141,6 +155,72 @@ void renoir_tfa_dsp_up(void) {
         redwood_wifi_tell("renoir-afe: port%#x stereo S24_LE 96000 SD%u: %s (opcode%#x status%#x); NOT STARTED\n",
             packet.port,direction ? 0 : 1,accepted ? "configuration accepted" : "configuration failed",
             answer.opcode,answer.words[1]);
-        if(!accepted) break;
+        if(!accepted) return;
     }
+    if(probe==2) renoir_afe_clock_test();
 }
+
+/* Bounded, silent interface test. No PCM, amplifier register or reset writes.
+ * Clock slots are 32 bits for S24_LE (96k * 2 * 32 = 6.144 MHz).
+ */
+static bool renoir_afe_command(uint32_t opcode,const void *payload,uint32_t bytes) {
+    struct redwood_apr_answer answer={0};
+    bool ok=redwood_adsp_apr(4,0,0,opcode,payload,bytes,1000,&answer) &&
+        answer.opcode==0x110e8 && answer.length>=8 && answer.words[0]==opcode && answer.words[1]==0;
+    redwood_wifi_tell("renoir-afe: command%#x %s (response%#x status%#x)\n",opcode,ok ? "accepted" : "FAILED",answer.opcode,answer.words[1]);
+    return ok;
+}
+static bool renoir_afe_clock(bool on) {
+    struct __attribute__((packed)) {
+        uint32_t bytes,low,high,handle,module,param;
+        uint16_t size,reserved;
+        uint32_t version,id,hz;
+        uint16_t attribute,root;
+        uint32_t enable;
+    } packet={.bytes=32,.module=0x1028f,.param=0x10290,.size=20,
+              .version=1,.id=0x104,.hz=6144000,.attribute=1,.enable=on};
+    _Static_assert(sizeof(packet)==48,"AFE clock ABI");
+    redwood_wifi_tell("renoir-afe: tertiary bit clock 6.144MHz %s\n",on ? "ON" : "OFF");
+    return renoir_afe_command(0x100f3,&packet,sizeof(packet));
+}
+static void renoir_afe_clock_test(void) {
+    if(!tfa_probe_complete || !tfa_amplifiers_off) {
+        redwood_wifi_tell("renoir-afe: silent start refused: both amplifiers must be confirmed off\n");
+        return;
+    }
+    const unsigned pins[4]={120,122,121,124};
+    const unsigned mux[4]={1,1,1,3};
+    uint32_t cfg[4],io[4];
+    bool rx_attempted=false,tx_attempted=false;
+    unsigned sck_changes=0,ws_changes=0;
+    if(!tfa_tlmm) tfa_tlmm=ml_io_map(TFA_TLMM,0x100000);
+    if(!tfa_tlmm) return;
+    for(unsigned i=0;i<4;i++) {cfg[i]=tr(TFA_CFG(pins[i]));io[i]=tr(TFA_IO(pins[i]));}
+    /* Linux active state: peripheral mux, 8mA, no pull; GPIO OE off. */
+    for(unsigned i=0;i<4;i++) tw(TFA_CFG(pins[i]),(mux[i]<<2)|(3u<<6));
+    if(!renoir_afe_clock(true)) goto cleanup;
+    uint16_t port[2]={0x1004,0};
+    rx_attempted=true;
+    if(!renoir_afe_command(0x100e5,port,sizeof(port))) goto cleanup;
+    port[0]=0x1005;tx_attempted=true;
+    if(!renoir_afe_command(0x100e5,port,sizeof(port))) goto cleanup;
+    uint32_t last_sck=tr(TFA_IO(120))&1,last_ws=tr(TFA_IO(122))&1;
+    for(unsigned i=0;i<20000;i++) {
+        uint32_t sck=tr(TFA_IO(120))&1,ws=tr(TFA_IO(122))&1;
+        sck_changes+=sck!=last_sck;ws_changes+=ws!=last_ws;last_sck=sck;last_ws=ws;
+        delay_for_interval(1,NSEC_PER_USEC);
+    }
+    redwood_wifi_tell("renoir-afe: clock test SCK transitions%u WS transitions%u; NO PCM, amplifiers untouched\n",sck_changes,ws_changes);
+cleanup:;
+    bool stopped=true;
+    uint16_t stop[2]={0x1005,0};
+    /* Stop even on a timeout: a command may have reached the DSP without a reply. */
+    if(tx_attempted) stopped=renoir_afe_command(0x100e6,stop,sizeof(stop)) && stopped;
+    stop[0]=0x1004;
+    if(rx_attempted) stopped=renoir_afe_command(0x100e6,stop,sizeof(stop)) && stopped;
+    stopped=renoir_afe_clock(false) && stopped;
+    for(unsigned i=0;i<4;i++) {tw(TFA_IO(pins[i]),io[i]&2);tw(TFA_CFG(pins[i]),cfg[i]);}
+    redwood_wifi_tell("renoir-afe: test ended, pins restored; DSP stop/clock-off %s\n",stopped ? "accepted" : "NOT ALL ACKNOWLEDGED");
+}
+
+bool renoir_tfa_is_off(void) { return tfa_probe_complete && tfa_amplifiers_off; }

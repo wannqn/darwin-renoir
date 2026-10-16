@@ -93,6 +93,7 @@ extern lck_mtx_t redwood_smmu_lock;
 static LCK_GRP_DECLARE(sound_lock_group, "redwood-sound");
 static LCK_MTX_DECLARE(sound_lock, &sound_lock_group);  /* the path being set up or taken down */
 
+static bool sound_renoir;
 static uint32_t level, seconds = 3, below = 240, pause_ms = 1000, gain = REDWOOD_GUARD_MAX_GAIN;
 static uint32_t guard_as = UINT32_MAX;  /* boot-arg sound_guard_as=N: the guard reckons the amplifiers at most N under (a test) */
 static char last_write[96] = "nothing written";
@@ -214,13 +215,20 @@ static const struct {
 	unsigned pin;
 	const char *name;
 	uint32_t cfg, io;               /* Android's active state */
-} tdm_pins[] = {
+} redwood_pins[] = {
 	{ 97, "gpio97 (bit clock)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 100, "gpio100 (frame sync)", CFG_MI2S0 | CFG_8MA | CFG_OUTPUT, 2 },
 	{ 98, "gpio98 (data in)", CFG_MI2S0 | CFG_8MA, 0 },
 	{ 99, "gpio99 (data out)", CFG_MI2S0 | CFG_8MA, 0 },
 };
-#define TDM_PINS                (sizeof(tdm_pins) / sizeof(tdm_pins[0]))
+static const typeof(redwood_pins[0]) renoir_pins[] = {
+    {120,"gpio120 (tertiary bit clock)",(1u<<2)|CFG_8MA,0},
+    {122,"gpio122 (tertiary frame sync)",(1u<<2)|CFG_8MA,0},
+    {121,"gpio121 (feedback SD0)",(1u<<2)|CFG_8MA,0},
+    {124,"gpio124 (playback SD1)",(3u<<2)|CFG_8MA,0},
+};
+#define tdm_pins (sound_renoir ? renoir_pins : redwood_pins)
+#define TDM_PINS 4
 static uint32_t found_cfg[TDM_PINS], found_io[TDM_PINS];
 static bool pins_taken;
 
@@ -245,8 +253,8 @@ pins_off(void)
 		return;
 	}
 	for (unsigned i = 0; i < TDM_PINS; i++) {
-		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
 		put(&tlmm, tdm_pins[i].name, GPIO_IO(tdm_pins[i].pin), found_io[i] & 2);
+		put(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin), found_cfg[i]);
 		get(&tlmm, tdm_pins[i].name, GPIO_CFG(tdm_pins[i].pin));
 	}
 	pins_taken = false;
@@ -336,7 +344,7 @@ command(const char *what, uint8_t service, uint16_t port, uint32_t opcode, const
 #define AFE_MODULE_CLOCK_SET                    0x0001028fu
 #define AFE_PARAM_ID_CLOCK_SET                  0x00010290u
 
-#define PORT                    0x9000          /* PRI_TDM_RX_0 */
+#define PORT                    (sound_renoir ? 0x1004 : 0x9000)          /* PRI_TDM_RX_0 */
 #define GROUP                   0x9100          /* PRI_TDM_RX */
 #define GROUP_OTHER_PORT        0x9002
 #define PORT_INVALID            0xffff
@@ -418,20 +426,50 @@ afe_port_param(const char *what, uint32_t module, uint32_t param, const void *da
 	return command(what, APR_SVC_AFE, 0, AFE_PORT_CMD_SET_PARAM_V2, packet, 16 + (uint32_t)sizeof(*p) + size, 0, NULL);
 }
 
-static bool clock_on, group_on, port_on;
+static bool clock_on, group_on, port_on, feedback_on;
 
 static bool
 afe_clock(bool on)
 {
-	struct afe_clock_set clock = { 1, CLOCK_PRI_TDM_IBIT, RATE * SLOT_BITS * SLOTS, CLOCK_INVERT_COUPLE_NO, 0, on };
+	struct afe_clock_set clock = { 1, sound_renoir ? 0x104 : CLOCK_PRI_TDM_IBIT,
+        sound_renoir ? 6144000 : RATE * SLOT_BITS * SLOTS, sound_renoir ? 1 : CLOCK_INVERT_COUPLE_NO, 0, on };
 
-	return afe_service_param(on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off", AFE_MODULE_CLOCK_SET,
+	return afe_service_param(sound_renoir ? (on ? "tertiary MI2S 6.144MHz on" : "tertiary MI2S clock off") :
+        (on ? "the TDM bit clock (0x200) at 3.072 MHz, on" : "the TDM bit clock, off"), AFE_MODULE_CLOCK_SET,
 	           AFE_PARAM_ID_CLOCK_SET, &clock, sizeof(clock));
+}
+
+static bool
+afe_renoir_on(void)
+{
+    if(!renoir_tfa_is_off()) {say("sound: Renoir requires both TFA amplifiers confirmed off\n");return false;}
+    clock_on=true; /* Even a timed-out clock request is undone by afe_off. */
+    if(!afe_clock(true)) return false;
+    for(unsigned direction=0;direction<2;direction++) {
+        struct __attribute__((packed)) {
+            uint16_t port,bytes;
+            uint32_t low,high,handle,module,param;
+            uint16_t size,reserved;
+            uint32_t version;
+            uint16_t bits,line,stereo,ws;
+            uint32_t rate;
+            uint16_t format,pad;
+        } config={.port=direction ? 0x1005 : 0x1004,.bytes=32,.module=0x1020c,.param=0x1020d,.size=20,
+                  .version=1,.bits=24,.line=direction ? 1 : 2,.stereo=1,.ws=1,.rate=96000};
+        _Static_assert(sizeof(config)==48,"Renoir AFE I2S ABI");
+        if(!command("Renoir tertiary MI2S stereo24bit96k config",APR_SVC_AFE,0,AFE_PORT_CMD_SET_PARAM_V2,
+                    &config,sizeof(config),0,NULL)) return false;
+        uint16_t start[2]={config.port,0};
+        if(direction)feedback_on=true;else port_on=true;
+        if(!command("Renoir tertiary MI2S start",APR_SVC_AFE,0,AFE_PORT_CMD_DEVICE_START,start,sizeof(start),0,NULL)) return false;
+    }
+    return true;
 }
 
 static bool
 afe_on(void)
 {
+    if(sound_renoir) return afe_renoir_on();
 	struct afe_group_tdm group = {
 		.version = 1, .group = GROUP, .ports = { PORT, GROUP_OTHER_PORT, PORT_INVALID, PORT_INVALID, PORT_INVALID,
 		                                         PORT_INVALID, PORT_INVALID, PORT_INVALID },
@@ -472,6 +510,11 @@ static void
 afe_off(void)
 {
 	uint16_t stop[2] = { PORT, 0 };
+    if(feedback_on) {
+        uint16_t feedback[2]={0x1005,0};
+        command("Renoir feedback stop",APR_SVC_AFE,0,AFE_PORT_CMD_DEVICE_STOP,feedback,sizeof(feedback),0,NULL);
+        feedback_on=false;
+    }
 	struct afe_group_enable disable = { GROUP, 0 };
 
 	if (port_on) {
@@ -526,7 +569,7 @@ static struct block apps_smmu_context = { "apps smmu, the audio context", 0, 0x1
 #define PTE_ADDRESS             0x0000fffffffff000ull
 #define AUDIO_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)       /* as redwood_wifi.c's */
 
-#define AUDIO_STREAM            0x1801
+#define AUDIO_STREAM            (sound_renoir ? 0x2001 : 0x1801)
 #define AUDIO_ADDRESSES         0x10000000ull   /* dt: qcom,iommu-dma-addr-pool of qcom,msm-audio-ion */
 #define AUDIO_STREAM_BITS       (1ull << 32)    /* the stream's low bits (0x1801 & 0xf), where the DSP takes them from */
 
@@ -1395,15 +1438,15 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		ok = false;
 		redwood_adsp_apr_events(events);
 	}
-	announce("the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
+	announce(sound_renoir ? "Renoir tertiary MI2S pins120/122/121/124, amplifiers off" : "the TDM pins (GPIO 97 to 100) to the interface, as Android's active state has them");
 	pins_on();
 	if (!afe_on()) {
 		goto out;
 	}
 	sleep_ms(20);
-	pin_activity(97, "the bit clock (gpio97)", &changes, &ones);
-	pin_activity(100, "the frame sync (gpio100)", &sync_changes, &sync_ones);
-	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE TDM CLOCK AND FRAME SYNC RUN at the pins" :
+	pin_activity(sound_renoir ? 120 : 97, "the bit clock", &changes, &ones);
+	pin_activity(sound_renoir ? 122 : 100, "the frame sync", &sync_changes, &sync_ones);
+	say("sound: %s\n", changes > 100 && sync_changes > 4 ? "THE AUDIO CLOCK AND FRAME SYNC RUN at the pins" :
 	    "THE PINS DO NOT SHOW A RUNNING TDM CLOCK");
 	if (level == 1) {
 		sleep_ms(seconds * 1000);
@@ -1477,10 +1520,19 @@ redwood_sound_dsp_up(void)
 {
 	thread_t thread;
 
-	if (!redwood_board_is("redwood")) return;
+	sound_renoir=redwood_board_is("renoir");
+    if (!sound_renoir && !redwood_board_is("redwood")) return;
 	if (!PE_parse_boot_argn("sound", &level, sizeof(level)) || level == 0) {
 		return;
 	}
+    if(sound_renoir && !renoir_tfa_is_off()) {
+        say("sound: Renoir silent test refused before taking pins: amplifier off state unknown\n");
+        return;
+    }
+    if(sound_renoir && level>2) {
+        say("sound: Renoir accepts only sound=1/2; TFA playback/protection is not ported yet\n");
+        return;
+    }
 	if (level > 4) {
 		level = 4;
 	}
