@@ -4,8 +4,10 @@
  * GPIO I2C. No amplifier enable, reset, calibration or OTP writes.
  */
 #include <kern/clock.h>
+#include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
+#include "renoir_tfa_amp_core.h"
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
 #include <sys/redwood_audio.h>
@@ -23,6 +25,7 @@ static uint32_t tfa_cfg[2], tfa_io[2];
 static unsigned tfa_probe_level;
 static bool tfa_probe_complete, tfa_amplifiers_off;
 static uint16_t tfa_factory_re25[2];
+static bool tfa_protection_ready;
 static uint32_t tr(unsigned off) { return *(volatile uint32_t *)(tfa_tlmm+off); }
 static void tw(unsigned off,uint32_t value) { *(volatile uint32_t *)(tfa_tlmm+off)=value; __asm__ volatile("dsb sy" ::: "memory"); }
 static void tdelay(void) { delay_for_interval(4,NSEC_PER_USEC); }
@@ -260,6 +263,149 @@ bool renoir_tfa_configure_protection(void) {
         renoir_tfa_dsp_param(0x1005,0x1000b912,0x1000b920,enabled,4) &&
         renoir_tfa_dsp_param(0x1004,0x1000b911,0x1000b921,mute,9) &&
         renoir_tfa_dsp_param(0x1004,0x1000b911,0x1000b921,calibration,9);
+    tfa_protection_ready=ok;
     redwood_wifi_tell("renoir-tfa-dsp: protection RAM configuration %s; channels muted, amplifiers still off\n",ok ? "accepted" : "FAILED");
     return ok;
+}
+
+/* Amplifier control uses only volatile I2C registers. OTP programming registers
+ * are inaccessible to the core. Factory R25C is rechecked after preparation.
+ */
+static LCK_GRP_DECLARE(tfa_group,"renoir-tfa");
+static LCK_MTX_DECLARE(tfa_lock,&tfa_group);
+static struct rtfa_amp tfa_amps[2]={{.address=0x34},{.address=0x35}};
+static bool tfa_prepared,tfa_running,tfa_broken,tfa_switch_taken;
+static uint32_t tfa_switch_cfg,tfa_switch_io;
+static uint32_t tfa_pcm_scale=2147483647u;
+static void tbus_begin(void) {
+    const unsigned pins[2]={36,37};
+    for(unsigned i=0;i<2;i++) {
+        tfa_cfg[i]=tr(TFA_CFG(pins[i]));tfa_io[i]=tr(TFA_IO(pins[i]));
+        tw(TFA_CFG(pins[i]),tfa_cfg[i]&~(TFA_OE|0x3cu));tw(TFA_IO(pins[i]),0);
+    }
+}
+static void tbus_end(void) {
+    const unsigned pins[2]={36,37};
+    for(unsigned i=0;i<2;i++){tw(TFA_IO(pins[i]),tfa_io[i]&2);tw(TFA_CFG(pins[i]),tfa_cfg[i]);}
+}
+static bool tput(uint8_t address,uint8_t reg,uint16_t value) {
+    bool ok=tstart()&&tsend(address<<1)&&tsend(reg)&&tsend(value>>8)&&tsend(value);
+    tstop();return ok;
+}
+static const struct rtfa_bus tfa_bus={tget,tput};
+static void tfa_reset_emergency(void) {
+    /* Shared reset held low, never a calibration or OTP operation. */
+    tw(TFA_IO(15),0);tw(TFA_CFG(15),TFA_OE|1);
+    tfa_broken=true;tfa_running=false;
+    redwood_wifi_tell("renoir-tfa: emergency hardware reset asserted\n");
+}
+static bool tfa_shutdown_locked(void) {
+    bool ok=true;
+    for(unsigned i=0;i<2;i++) {
+        ok=rtfa_shutdown(&tfa_amps[i],&tfa_bus)&&ok;
+        ok=tput(0x34+i,0xa1,0)&&ok;ok=tput(0x34+i,0x0f,0)&&ok;
+    }
+    tfa_running=tfa_prepared=false;tfa_amplifiers_off=ok;
+    if(!ok)tfa_reset_emergency();
+    if(tfa_switch_taken){tw(TFA_IO(24),tfa_switch_io&2);tw(TFA_CFG(24),tfa_switch_cfg);tfa_switch_taken=false;}
+    return ok;
+}
+bool renoir_tfa_amp_prepare(void) {
+    if(!redwood_board_is("renoir") || !tfa_protection_ready || !renoir_tfa_is_off() || tfa_broken)return false;
+    uint64_t size=0;const uint8_t *data=redwood_adsp_fw_file("tfa98xx.cnt",&size);
+    struct renoir_tfa_container container;struct renoir_tfa_plan plans[2];
+    bool valid=data && size<=1024*1024 && renoir_tfa_open(&container,data,(uint32_t)size) &&
+        renoir_tfa_stereo(&container,0,&plans[0]) && renoir_tfa_stereo(&container,1,&plans[1]);
+    if(!valid){if(data)redwood_adsp_fw_free(data,size);return false;}
+    renoir_tfa_amp_volume(240,0);
+    lck_mtx_lock(&tfa_lock);tbus_begin();
+    tfa_switch_cfg=tr(TFA_CFG(24));tfa_switch_io=tr(TFA_IO(24));tfa_switch_taken=true;
+    tw(TFA_IO(24),0);tw(TFA_CFG(24),TFA_OE|1); /* Android stereo speaker switch. */
+    bool ok=true;
+    for(unsigned i=0;i<2 && ok;i++) {
+        ok=rtfa_prepare(&tfa_amps[i],&tfa_bus,&plans[i]);
+        uint16_t re25=0,mtp=0;
+        ok=ok&&tget(0x34+i,0xf5,&re25)&&tget(0x34+i,0xf0,&mtp)&&re25==tfa_factory_re25[i]&&(mtp&2);
+        redwood_wifi_tell("renoir-tfa: address%#x stereo prepare %s, last field%#x, factory R25C%u\n",0x34+i,ok ? "OK" : "FAILED",tfa_amps[i].failed_field,re25);
+    }
+    tfa_prepared=ok;
+    if(!ok)tfa_shutdown_locked();
+    tbus_end();lck_mtx_unlock(&tfa_lock);redwood_adsp_fw_free(data,size);return ok;
+}
+static bool tfa_healthy_locked(bool require_amp) {
+    static unsigned observations;
+    bool report=observations<4 || observations%25==0;observations++;
+    for(unsigned i=0;i<2;i++) {
+        uint16_t status=0,amp=0,temp=0,extra=0;
+        if(!tget(0x34+i,0x10,&status)||!tget(0x34+i,0x11,&amp)||!tget(0x34+i,0x13,&extra)||!tget(0x34+i,0x16,&temp))return false;
+        int c=temp&0x1ff;if(c&0x100)c-=512;
+        if(report)redwood_wifi_tell("renoir-tfa: address%#x health status%#x amp%#x manager%#x temp_raw%#x PWM%u\n",
+            0x34+i,status,amp,extra,temp,(amp>>14)&1);
+        if(!rtfa_status_healthy(status,amp,extra,temp,require_amp)) {
+            redwood_wifi_tell("renoir-tfa: address%#x FAULT status%#x amp%#x extra%#x temp%d\n",0x34+i,status,amp,extra,c);return false;
+        }
+    }
+    return true;
+}
+bool renoir_tfa_amp_healthy(void) {
+    lck_mtx_lock(&tfa_lock);tbus_begin();bool ok=!tfa_broken && tfa_running && tfa_healthy_locked(true);
+    if(!ok)tfa_shutdown_locked();tbus_end();lck_mtx_unlock(&tfa_lock);return ok;
+}
+static bool tfa_dsp_mute(bool muted) {
+    uint8_t cmd[9]={0,0x81,3,0,0,muted,0,0,muted};
+    return renoir_tfa_dsp_param(0x1004,0x1000b911,0x1000b921,cmd,sizeof(cmd));
+}
+bool renoir_tfa_amp_start(void) {
+    if(!tfa_prepared || tfa_broken || !tfa_protection_ready || !tfa_dsp_mute(true))return false;
+    delay_for_interval(60,NSEC_PER_MSEC);
+    lck_mtx_lock(&tfa_lock);tbus_begin();bool ok=true;
+    for(unsigned i=0;i<2 && ok;i++) {
+        ok=rtfa_power(&tfa_amps[i],&tfa_bus,false);
+        uint16_t status=0;
+        for(unsigned ms=0;ok && ms<100;ms++) {
+            ok=tget(0x34+i,0x10,&status);if(status&0x40)break;
+            delay_for_interval(1,NSEC_PER_MSEC);
+        }
+        ok=ok&&(status&0x40)&&rtfa_power(&tfa_amps[i],&tfa_bus,true);
+    }
+    delay_for_interval(20,NSEC_PER_MSEC);
+    tfa_running=ok;tfa_amplifiers_off=!ok;
+    ok=ok&&tfa_healthy_locked(true);
+    if(!ok)tfa_shutdown_locked();tbus_end();lck_mtx_unlock(&tfa_lock);
+    if(ok)ok=tfa_dsp_mute(false);
+    if(!ok)renoir_tfa_amp_stop();
+    redwood_wifi_tell("renoir-tfa: amplifier start %s\n",ok ? "OK" : "FAILED");return ok;
+}
+void renoir_tfa_amp_stop(void) {
+    if(!tfa_tlmm || !tfa_prepared)return;
+    if(tfa_dsp_mute(true))delay_for_interval(60,NSEC_PER_MSEC);
+    lck_mtx_lock(&tfa_lock);tbus_begin();bool ok=true;
+    for(unsigned i=0;i<2;i++) {
+        ok=rtfa_field(&tfa_amps[i],&tfa_bus,0x0030,0)&&ok;
+        ok=rtfa_field(&tfa_amps[i],&tfa_bus,0x0000,1)&&ok;
+    }
+    tfa_running=false;tfa_amplifiers_off=ok;
+    if(!ok)tfa_shutdown_locked();tbus_end();lck_mtx_unlock(&tfa_lock);
+    redwood_wifi_tell("renoir-tfa: amplifiers stopped %s\n",ok ? "OK" : "FAILED");
+}
+void renoir_tfa_amp_release(void) {
+    if(!tfa_tlmm || !tfa_prepared)return;
+    renoir_tfa_amp_stop();lck_mtx_lock(&tfa_lock);tbus_begin();
+    bool ok=tfa_shutdown_locked();tbus_end();lck_mtx_unlock(&tfa_lock);
+    redwood_wifi_tell("renoir-tfa: volatile registers restored %s\n",ok ? "OK" : "RESET");
+}
+bool renoir_tfa_amp_volume(uint32_t below,unsigned fade_ms) {
+    (void)fade_ms;
+    if(below<240)below=240; /* Conservative -30dB digital cap until audible tests. */
+    if(below>960)below=960;
+    uint64_t scale=2147483647u;
+    for(unsigned i=0;i<below;i++)scale=(scale*2116801233u)>>31; /* -1/8dB per step */
+    __atomic_store_n(&tfa_pcm_scale,(uint32_t)scale,__ATOMIC_RELEASE);return true;
+}
+void renoir_tfa_scale_pcm(int16_t *samples,unsigned frames) {
+    uint32_t scale=__atomic_load_n(&tfa_pcm_scale,__ATOMIC_ACQUIRE);
+    for(unsigned i=0;i<frames*2;i++)samples[i]=(int16_t)(((int64_t)samples[i]*scale)>>31);
+}
+void renoir_tfa_amp_quiesce(void) {
+    if(tfa_tlmm && (tfa_running || tfa_prepared))tfa_reset_emergency();
 }

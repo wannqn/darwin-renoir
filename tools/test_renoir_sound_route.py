@@ -18,6 +18,7 @@ code=r"""
 #include <string.h>
 static bool sound_renoir=true,off=true,clock_on,group_on,port_on,feedback_on;
 static unsigned calls,fail_at,ops[16];
+static uint32_t level=2;
 #define RATE 48000
 #define SLOT_BITS 32
 #define SLOTS 2

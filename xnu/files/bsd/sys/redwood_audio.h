@@ -55,6 +55,14 @@ void renoir_tfa_init(void);
 void renoir_tfa_dsp_up(void);
 bool renoir_tfa_is_off(void);
 bool renoir_tfa_configure_protection(void);
+bool renoir_tfa_amp_prepare(void);
+bool renoir_tfa_amp_start(void);
+bool renoir_tfa_amp_healthy(void);
+void renoir_tfa_amp_stop(void);
+void renoir_tfa_amp_release(void);
+bool renoir_tfa_amp_volume(uint32_t below,unsigned fade_ms);
+void renoir_tfa_scale_pcm(int16_t *samples,unsigned frames);
+void renoir_tfa_amp_quiesce(void);
 void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 void redwood_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (bsd/dev/redwood_haptic.c) */
 void redwood_haptic_quiesce(void);      /* its chip back into reset: at the run's end and on a panic's way out */

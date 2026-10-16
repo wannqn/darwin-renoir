@@ -3,13 +3,13 @@
 from pathlib import Path
 import tempfile,subprocess
 r=Path(__file__).resolve().parents[1]
-s=(r/'xnu/files/bsd/dev/renoir_tfa.c').read_text();s=s[s.index('static bool renoir_tfa_dsp_param('):]
+s=(r/'xnu/files/bsd/dev/renoir_tfa.c').read_text();s=s[s.index('static bool renoir_tfa_dsp_param('):s.index('/* Amplifier control')]
 code=r"""
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <assert.h>
-static bool board=true,off=true;
+static bool board=true,off=true,tfa_protection_ready;
 static uint16_t tfa_factory_re25[2]={6232,7624};
 static unsigned calls,fail_at;
 struct redwood_apr_answer {uint32_t opcode,length,words[16];};

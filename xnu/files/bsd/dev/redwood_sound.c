@@ -98,6 +98,14 @@ static uint32_t level, seconds = 3, below = 240, pause_ms = 1000, gain = REDWOOD
 static uint32_t guard_as = UINT32_MAX;  /* boot-arg sound_guard_as=N: the guard reckons the amplifiers at most N under (a test) */
 static char last_write[96] = "nothing written";
 
+static bool sound_speaker_prepare(const uint8_t *data,uint64_t size) {return sound_renoir ? renoir_tfa_amp_prepare() : redwood_speaker_prepare(data,size);}
+static bool sound_speaker_start(void) {return sound_renoir ? renoir_tfa_amp_start() : redwood_speaker_start();}
+static bool sound_speaker_healthy(void) {return sound_renoir ? renoir_tfa_amp_healthy() : redwood_speaker_healthy();}
+static void sound_speaker_stop(void) {if(sound_renoir)renoir_tfa_amp_stop();else redwood_speaker_stop();}
+static bool sound_speaker_volume(uint32_t value,uint32_t fade) {return sound_renoir ? renoir_tfa_amp_volume(value,fade) : redwood_speaker_volume(value,fade);}
+static uint32_t sound_speaker_monitor(bool tell) {return sound_renoir ? 0 : redwood_speaker_monitor(tell);}
+static void sound_speaker_quiesce(void) {if(sound_renoir)renoir_tfa_amp_quiesce();else redwood_speaker_quiesce();}
+
 /* ---- what is said: to the loader's log as well, as it happens ---------------------------------------- */
 
 static int say(const char *format, ...) __printflike(1, 2);
@@ -465,7 +473,7 @@ afe_renoir_on(void)
     }
     uint32_t protection=0;
     PE_parse_boot_argn("renoir_tfa_protection",&protection,sizeof(protection));
-    if(protection && !renoir_tfa_configure_protection()) return false;
+    if((protection || level>=3) && !renoir_tfa_configure_protection()) return false;
     return true;
 }
 
@@ -1000,6 +1008,7 @@ period_fill(unsigned period, bool silent)
 		samples[2 * frame] = sample;
 		samples[2 * frame + 1] = sample;
 	}
+    if(sound_renoir && level>=3)renoir_tfa_scale_pcm(samples,PERIOD_FRAMES);
 	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + PERIOD_BYTES; line += 64) {
 		__asm__ volatile ("dc cvac, %0" : : "r" (line));        /* the DSP reads memory, not our caches */
 	}
@@ -1079,7 +1088,7 @@ play(uint32_t ms, bool amplifiers)
 		if (amplifiers && now - last_look >= 200000) {
 			last_look = now;
 			healthy_looks++;
-			if (!redwood_speaker_healthy()) {
+			if (!sound_speaker_healthy()) {
 				ok = false;
 				tone_over = true;
 			}
@@ -1204,6 +1213,7 @@ period_fill_ios(unsigned period)
 		redwood_audio_record_fed(samples, n);
 	}
 	guard_periods++;
+    if(sound_renoir && level>=3)renoir_tfa_scale_pcm(samples,PERIOD_FRAMES);
 	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + PERIOD_BYTES; line += 64) {
 		__asm__ volatile ("dc cvac, %0" : : "r" (line));
 	}
@@ -1308,10 +1318,10 @@ watch(void)
 			if (muted) {
 				guard_off(true);
 				if (on) {
-					redwood_speaker_stop();
+					sound_speaker_stop();
 					on = false;
 				}
-			} else if (on && !redwood_speaker_volume(below + extra, 1)) {
+			} else if (on && !sound_speaker_volume(below + extra, 1)) {
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1323,7 +1333,7 @@ watch(void)
 			say_when("iOS plays: the amplifiers are started");
 			starts++;
 			ios_peak = 0;
-			if (!redwood_speaker_start() || !redwood_speaker_volume(below + extra, 1)) {
+			if (!sound_speaker_start() || !sound_speaker_volume(below + extra, 1)) {
 				say("sound: THE AMPLIFIERS DID NOT START; iOS's sound goes on to the DSP, unheard\n");
 				guard_off(true);
 				given_up = true;
@@ -1343,11 +1353,11 @@ watch(void)
 			say("sound: what iOS wrote while they were on peaked at %u%% of full scale (%u)\n", ios_peak * 100 / 32768,
 			    ios_peak);
 			guard_off(false);
-			redwood_speaker_stop();
+			sound_speaker_stop();
 			on = false;
 		} else if (on && now - last_look >= 200000) {
 			last_look = now;
-			if (!redwood_speaker_healthy()) {
+			if (!sound_speaker_healthy()) {
 				guard_off(true);
 				on = false;
 				given_up = true;
@@ -1356,7 +1366,7 @@ watch(void)
 				uint32_t wanted;
 
 				last_monitor = now;
-				wanted = redwood_speaker_monitor(monitor_looks++ % 10 == 0);
+				wanted = sound_speaker_monitor(monitor_looks++ % 10 == 0);
 				if (wanted != monitor) {
 					say("sound: the amplifiers' watch asks for %u.%03u dB less (it was %u.%03u)\n", wanted / 8, wanted % 8 * 125,
 					    monitor / 8, monitor % 8 * 125);
@@ -1390,7 +1400,8 @@ take_down(void)
 	lck_mtx_lock(&sound_lock);
 	if (running && !taken_down) {
 		taken_down = true;
-		redwood_speaker_stop();
+		sound_speaker_stop();
+        if(sound_renoir)renoir_tfa_amp_release();
 		stream_off();
 		afe_off();
 		pins_off();
@@ -1423,7 +1434,7 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		    "the port and a stream with a test tone, the amplifiers off" :
 		    "the port, a stream with a test tone, and the amplifiers", seconds);
 	}
-	if (level >= 3) {
+	if (level >= 3 && !sound_renoir) {
 		acf = redwood_adsp_fw_file("aw882xx_acf.bin", &acf_size);
 		if (acf == NULL) {
 			say("sound: no /fw/aw882xx_acf.bin: put the phone's /vendor/etc/aw882xx_acf.bin into fw-audio/ and run SYSTEM=1 "
@@ -1463,10 +1474,10 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 		thread_t feeder;
 
 		announce("the amplifiers, set up from Android's Music profile, powered down until iOS plays");
-		if (!redwood_speaker_prepare(acf, acf_size)) {
+		if (!sound_speaker_prepare(acf, acf_size)) {
 			goto out;
 		}
-		redwood_adsp_fw_free(acf, acf_size);
+		if(acf)redwood_adsp_fw_free(acf, acf_size);
 		acf = NULL;
 		feeder_runs = true;
 		if (kernel_thread_start(feeder_thread, NULL, &feeder) != KERN_SUCCESS) {
@@ -1492,12 +1503,12 @@ sound_thread(__unused void *parameter, __unused wait_result_t result)
 	if (level >= 3) {
 		/* the clock runs (the port is started, the stream as well): the amplifiers can lock to it */
 		announce("the amplifiers, set up from Android's Music profile, then started at the lowest volume");
-		if (!redwood_speaker_prepare(acf, acf_size) || !redwood_speaker_start()) {
+		if (!sound_speaker_prepare(acf, acf_size) || !sound_speaker_start()) {
 			goto out;
 		}
 	}
 	/* (the amplifiers are faded in before the tone begins: they fade in on silence, and the tone starts at that level) */
-	if (level >= 3 && !redwood_speaker_volume(below, 50)) {
+	if (level >= 3 && !sound_speaker_volume(below, 50)) {
 		goto out;
 	}
 	if (level >= 3) {
@@ -1532,10 +1543,7 @@ redwood_sound_dsp_up(void)
         say("sound: Renoir silent test refused before taking pins: amplifier off state unknown\n");
         return;
     }
-    if(sound_renoir && level>2) {
-        say("sound: Renoir accepts only sound=1/2; TFA playback/protection is not ported yet\n");
-        return;
-    }
+
 	if (level > 4) {
 		level = 4;
 	}
@@ -1547,6 +1555,7 @@ redwood_sound_dsp_up(void)
 	if (gain > REDWOOD_GUARD_MAX_GAIN) {
 		gain = REDWOOD_GUARD_MAX_GAIN;
 	}
+    if(sound_renoir) {gain=0;if(below<240)below=240;}
 	redwood_guard_configure(true, gain);
 	if (level >= 2 && level <= 3 && seconds > 3) {
 		seconds = 3;            /* the test tone: three seconds at most */
@@ -1571,5 +1580,5 @@ redwood_sound_dsp_down(void)
 void
 redwood_sound_quiesce(void)
 {
-	redwood_speaker_quiesce();
+	sound_speaker_quiesce();
 }
