@@ -51,6 +51,7 @@ void redwood_audio_set_sink(const char *name, redwood_audio_sink_t sink);
 bool redwood_audio_volume(uint32_t *below, bool *muted, uint32_t *generation);
 void redwood_audio_init(void);
 void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
+void renoir_tfa_init(void);
 void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 
 /*

@@ -711,3 +711,10 @@ getaddrinfo/resolve вернул ошибку, поэтому DNS по всем 
 упаковки. PACK_JOBS ограничивает параллелизм mkpackfs (по умолчанию до4;
 на этой машине использовано2), чтобы не держать сразу десятки cache-файлов
 по100MB при недостатке памяти. Firmware и секреты остаются игнорируемыми.
+
+
+### Hardware checkpoint — 2026-10-16
+
+Cold RAM boot with `adsp=1 speaker_probe=2 battery=1` confirmed both TFA9873 IDs (`0x34`/`0x35`, revision `0x0b73`). The read-only probe restored GPIO36/37 state and did not enable amplifiers or write calibration/OTP. ADSP reached APR audio-services-ready in 4655 ms (node 5, 12 services). This confirms DSP transport, not speaker playback: the Renoir Tertiary MI2S / TFA protection path is still pending.
+
+Wi-Fi concurrently acquired `192.168.1.186`; HTTPS example.com returned 200 (577 bytes, 0.17 s). A subsequent raw resolver call succeeded; the earlier failure before CFNetwork initialization is not proven fixed. Live evidence: `logs/phone-adsp-live-20261016.log`. The phone was left running iOS without a return timer; no partition was flashed.
