@@ -3,7 +3,7 @@
 from pathlib import Path
 import tempfile,subprocess
 r=Path(__file__).resolve().parents[1]
-s=(r/'xnu/files/bsd/dev/renoir_tfa.c').read_text();s=s[s.index('static bool renoir_afe_command('):]
+s=(r/'xnu/files/bsd/dev/renoir_tfa.c').read_text();s=s[s.index('static bool renoir_afe_command('):s.index('/* NXP host DSP protocol')]
 code=r"""
 #include <stdint.h>
 #include <stdbool.h>

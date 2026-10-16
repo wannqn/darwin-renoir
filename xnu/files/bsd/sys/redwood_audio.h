@@ -54,6 +54,7 @@ void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virti
 void renoir_tfa_init(void);
 void renoir_tfa_dsp_up(void);
 bool renoir_tfa_is_off(void);
+bool renoir_tfa_configure_protection(void);
 void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 void redwood_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (bsd/dev/redwood_haptic.c) */
 void redwood_haptic_quiesce(void);      /* its chip back into reset: at the run's end and on a panic's way out */

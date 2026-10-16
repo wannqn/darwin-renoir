@@ -740,3 +740,10 @@ Final hardware check with the refreshed full system: ADSP/APR ready in4757ms; bo
 The shared ASM/ADM driver now accepts Renoir `sound=1/2` only, with Tertiary MI2S GPIO120/122/121/124 (mux1/1/1/3), AFE RX0x1004 and feedback TX0x1005, and audio SMMU stream0x2001. Higher sound levels are refused. Both TFA amplifiers must be confirmed off before pins are taken. The PCM stream remains stereo16bit48kHz; the AFE interface is stereo24bit96kHz.
 
 Physical `sound=2 sound_secs=3` completed: ASM/ADM opened,159 buffers sent and159 returned, zero errors/underflows, about48.4k frames/s; no reported SMMU request faults. Stream/COPP/mapping, RX/TX, clock, pins and SMMU state were released. Factory calibration was read without writes: R25C6232/7624mOhm and MTPEX set on both chips. Evidence: logs/phone-afe-clock-final.log and logs/phone-silent-stream-live.log. This validates digital transport only; TFA host protection and powered speaker output remain pending.
+
+
+### NXP DSP configuration checkpoint — 2026-10-16
+
+Optional `renoir_tfa_protection=1` with Renoir `sound=2` configures the embedded TFADSP RX/TX modules after the MI2S ports start. All requests are RAM-only APR parameters: bypass0, TX feedback enable1, both channels muted, then the two factory R25C values converted to Q16. No amplifier or OTP register is written. Missing calibration, unknown amplifier-off state or a rejected command aborts the sequence.
+
+The real Renoir DSP accepted all four parameters. A fresh repeat then sent and returned159 PCM buffers, with zero errors/underflows and about48352 frames/s, followed by LEVEL DONE and resource restoration. Evidence retained immediately: logs/phone-tfa-repeat-06.log. Module code is embedded in Renoir ADSP firmware (TFADSP08.06.02). Host tests cover exact NXP packet IDs, channel order, fixed calibration vectors and refusal handling. This verifies command acceptance and digital transport; thermal/excursion protection under powered speaker load and audible playback are not yet verified.

@@ -463,6 +463,9 @@ afe_renoir_on(void)
         if(direction)feedback_on=true;else port_on=true;
         if(!command("Renoir tertiary MI2S start",APR_SVC_AFE,0,AFE_PORT_CMD_DEVICE_START,start,sizeof(start),0,NULL)) return false;
     }
+    uint32_t protection=0;
+    PE_parse_boot_argn("renoir_tfa_protection",&protection,sizeof(protection));
+    if(protection && !renoir_tfa_configure_protection()) return false;
     return true;
 }
 

@@ -22,6 +22,7 @@ static vm_offset_t tfa_tlmm;
 static uint32_t tfa_cfg[2], tfa_io[2];
 static unsigned tfa_probe_level;
 static bool tfa_probe_complete, tfa_amplifiers_off;
+static uint16_t tfa_factory_re25[2];
 static uint32_t tr(unsigned off) { return *(volatile uint32_t *)(tfa_tlmm+off); }
 static void tw(unsigned off,uint32_t value) { *(volatile uint32_t *)(tfa_tlmm+off)=value; __asm__ volatile("dsb sy" ::: "memory"); }
 static void tdelay(void) { delay_for_interval(4,NSEC_PER_USEC); }
@@ -97,6 +98,7 @@ static void tfa_probe(__unused void *arg,__unused wait_result_t result) {
         off_count+=off;
         uint16_t mtp=0,re25=0;
         bool calibrated=readable && tget(0x34+i,0xf0,&mtp) && tget(0x34+i,0xf5,&re25) && (mtp&2)!=0;
+        if(calibrated && re25>=2000 && re25<=20000) tfa_factory_re25[i]=re25;
         redwood_wifi_tell("renoir-tfa: address%#x factory calibration MTP%#x R25C%u mOhm %s (read only)\n",
             0x34+i,mtp,re25,calibrated && re25>=2000 && re25<=20000 ? "valid" : "NOT CONFIRMED");
         redwood_wifi_tell("renoir-tfa: address%#x SYS_CTRL%#x %s\n",0x34+i,control,off ? "amplifier off" : "off state NOT CONFIRMED");
@@ -224,3 +226,40 @@ cleanup:;
 }
 
 bool renoir_tfa_is_off(void) { return tfa_probe_complete && tfa_amplifiers_off; }
+
+/* NXP host DSP protocol from OKX tfa_platform_interface_definition.h and
+ * tfa98xx.c. RAM-only configuration; no TFA register writes or calibration.
+ */
+static bool renoir_tfa_dsp_param(uint16_t port,uint32_t module,uint32_t param,const uint8_t *data,uint16_t size) {
+    uint8_t packet[16+12+12]={0};
+    if(size>12) return false;
+    uint32_t value=module;memcpy(packet+16,&value,4);
+    value=param;memcpy(packet+20,&value,4);
+    uint16_t payload=12+size;
+    memcpy(packet,&port,2);memcpy(packet+2,&payload,2);memcpy(packet+24,&size,2);
+    memcpy(packet+28,data,size);
+    struct redwood_apr_answer answer={0};
+    bool ok=redwood_adsp_apr(4,0,0,0x100ef,packet,28+size,1000,&answer) &&
+        answer.opcode==0x110e8 && answer.length>=8 && answer.words[0]==0x100ef && answer.words[1]==0;
+    redwood_wifi_tell("renoir-tfa-dsp: port%#x module%#x param%#x %s (response%#x status%#x)\n",
+        port,module,param,ok ? "accepted" : "REFUSED",answer.opcode,answer.words[1]);
+    return ok;
+}
+bool renoir_tfa_configure_protection(void) {
+    if(!redwood_board_is("renoir") || !renoir_tfa_is_off() ||
+       !tfa_factory_re25[0] || !tfa_factory_re25[1]) return false;
+    uint8_t enabled[4]={1,0,0,0},bypass[4]={0},mute[9]={0,0x81,3,0,0,1,0,0,1};
+    uint8_t calibration[9]={0,0x81,5};
+    for(unsigned i=0;i<2;i++) {
+        uint32_t q16=(uint32_t)tfa_factory_re25[i]*65536u/1000u;
+        calibration[3+3*i]=(uint8_t)(q16>>16);
+        calibration[4+3*i]=(uint8_t)(q16>>8);
+        calibration[5+3*i]=(uint8_t)q16;
+    }
+    bool ok=renoir_tfa_dsp_param(0x1004,0x1000b911,0x1000b923,bypass,4) &&
+        renoir_tfa_dsp_param(0x1005,0x1000b912,0x1000b920,enabled,4) &&
+        renoir_tfa_dsp_param(0x1004,0x1000b911,0x1000b921,mute,9) &&
+        renoir_tfa_dsp_param(0x1004,0x1000b911,0x1000b921,calibration,9);
+    redwood_wifi_tell("renoir-tfa-dsp: protection RAM configuration %s; channels muted, amplifiers still off\n",ok ? "accepted" : "FAILED");
+    return ok;
+}

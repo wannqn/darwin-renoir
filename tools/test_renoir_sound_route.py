@@ -34,6 +34,8 @@ static unsigned calls,fail_at,ops[16];
 #define GROUP 0x9100
 #define say(...) ((void)0)
 static bool renoir_tfa_is_off(void){return off;}
+static bool PE_parse_boot_argn(const char *s,void *v,unsigned n){(void)s;(void)n;*(uint32_t*)v=0;return true;}
+static bool renoir_tfa_configure_protection(void){assert(0);return false;}
 struct afe_clock_set {uint32_t version,id,hz;uint16_t attribute,root;uint32_t enable;} __attribute__((packed));
 struct afe_group_enable {uint16_t group,enable;} __attribute__((packed));
 static bool command(const char *what,uint8_t service,uint16_t port,uint32_t opcode,const void *buf,uint32_t size,uint32_t wanted,void *answer){
