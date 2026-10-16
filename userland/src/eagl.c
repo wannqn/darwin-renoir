@@ -50,7 +50,7 @@
  * draws without a program alone, glcopy=1 copies every IOSurface as if the library could not
  * share one, glwait=1 waits for the GPU at the end of every frame and glwait=0 never (see
  * wait_for_frames), glfetch=0 keeps EXT_shader_framebuffer_fetch from CoreAnimation (see
- * fetch_offered), glprecision=0 leaves the shaders' "lowp" and "mediump" as they are (see all_highp), glenv=NAME=VALUE puts that into the environment for the library to find
+ * fetch_offered), glgroup=0 leaves vibrant layers inside groups as they were (see group_draw_begin()), glprecision=0 leaves the shaders' "lowp" and "mediump" as they are (see all_highp), glenv=NAME=VALUE puts that into the environment for the library to find
  * (its own switches: FD_MESA_DEBUG=sysmem, say), vblur=0 blurs nothing whose radius varies and
  * vblur=2 paints such blurs by their masks instead (see vblur_on), glframes=1 writes a line for
  * every frame (see frame_end()).
@@ -115,6 +115,12 @@ typedef GLDEBUGPROC GLDEBUGPROCKHR;
 #define GL_FRAGMENT_SHADER              0x8b30
 #define GL_TEXTURE                      0x1702
 #define GL_READ_FRAMEBUFFER             0x8ca8
+#define GL_DRAW_FRAMEBUFFER             0x8ca9
+#define GL_READ_FRAMEBUFFER_BINDING     0x8caa
+#define GL_DRAW_FRAMEBUFFER_BINDING     0x8ca6
+#define GL_COLOR_BUFFER_BIT             0x4000
+#define GL_NEAREST                      0x2600
+#define GL_LINES                        0x0001
 #define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE 0x8cd0
 #define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME 0x8cd1
 #define GL_COLOR_ATTACHMENT0            0x8ce0
@@ -202,6 +208,16 @@ now_us(void)
 
 #define SLOTS           0x440           /* entries of the table: more than iOS's has (checked below) */
 
+/* (a vibrant layer inside a group: see group_draw_begin()) */
+#define GROUP_TEXTURES  8192
+enum { GROUP_NONE, GROUP_FRESH, GROUP_VIBRANT };
+struct group_texture {
+	uint8_t state;                  /* GROUP_FRESH: cleared, nothing drawn in it since; GROUP_VIBRANT: a vibrant layer's coverage */
+	GLfloat colours[20];            /* ... and that layer's colour matrix */
+};
+static int group_vibrant_on = 1;        /* boot-arg glgroup=0 */
+static unsigned group_covered, group_laid, group_flattened;    /* (glframes=1) this frame's */
+
 /* A texture that stands for an IOSurface. */
 struct image {
 	GLuint texture;
@@ -209,6 +225,7 @@ struct image {
 	bool target;                    /* drawn into (attachImage) rather than shown (texImageIOSurface) */
 	bool invert, drawn;
 	bool shared;                    /* the texture is the surface's memory: nothing to copy */
+	GLuint mirror;                  /* a texture that is the surface's memory, which the GPU copies the frame into (blit_targets) */
 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
 	bool alpha_first;               /* its pixels are opacity, blue, green, red in memory: see my_attachImage() */
 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
@@ -229,6 +246,7 @@ struct eagl {
 	GLuint framebuffer;             /* the one bound */
 	GLuint colour;                  /* ... and the texture that is its colour attachment (0: none, or no texture) */
 	GLuint reader;                  /* a framebuffer of ours, to read a texture back */
+	GLuint writer;                  /* ... and one to copy a frame into its surface with (blit_targets) */
 	GLuint program;                 /* the one in use, as CoreAnimation has it */
 	GLuint plain, lookup;           /* programs of ours for when that is none (plain_draw_begin()) */
 	GLint plain_matrix, plain_textured, lookup_matrix;
@@ -240,6 +258,13 @@ struct eagl {
 	GLint unclear_box[4];
 	GLfloat unclear_colour[4];
 	GLboolean unclear_boxed;
+	struct group_texture *groups;   /* CoreAnimation's textures: which are groups with a vibrant layer in them (group_draw_begin()) */
+	GLuint group_cover, group_over, group_flat;     /* ... and our programs for them */
+	bool group_failed;
+	GLint group_cover_matrix, group_cover_texmat, group_over_matrix, group_over_texmat, group_over_colours;
+	GLint group_flat_matrix, group_flat_colour;
+	GLboolean group_blend;          /* the blending a draw of those had, to be put back after it */
+	GLint group_blend_func[4];
 	GLuint box;                     /* and one that makes a picture eight times smaller */
 	GLint box_matrix, box_places;
 	GLuint halve, vblur;            /* and two for the blur whose radius varies (vblur_level(), vblur_draw_begin()) */
@@ -268,6 +293,9 @@ struct eagl {
 		GLint box[4];
 		uint32_t surface;       /* that picture's IOSurface */
 		unsigned vrd, vrb, into_display;
+		unsigned solid_spans, blended_spans;    /* line draws into it with blending off and on (glyphs' spans) */
+		unsigned solid_ends, blended_ends;      /* ... and their lines' ends */
+		unsigned other_spans, other_ends;       /* line draws into other targets */
 	} line;
 	/* a frame's worth */
 	unsigned calls, draws, triangles, uploads, clears, last_draws;
@@ -294,11 +322,23 @@ static int trace_look;                          /* boot-arg gltrace_look=1: ... 
 static float trace_middle[2];                   /* ... which is here, as CoreAnimation counts */
 static int trace_listed;                        /* the draw at hand is one of them */
 static int all_shaders;                         /* boot-arg glshaders=1: the text of every shader, not of the first two */
+static struct group_texture *group_of(struct eagl *e, GLuint texture);
 static __thread struct eagl *current;
 static struct eagl *contexts[8];
 static uint32_t slot_calls[SLOTS];
 static int check_errors = 1;            /* ask the library for an error after every call (the first frames) */
 static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
+/*
+ * A frame is not drawn into its surface's memory but into a texture of the library's own, and the
+ * GPU copies it into the surface at the frame's end (one blit; the display's driver waits for that
+ * submission, as it waited for the frame's last draw). Drawn into the surface's memory directly,
+ * frames came out with parts of them missing, every other frame for a while -- Control Center's
+ * modules, the home screen's icons -- where CoreAnimation reads the picture it is drawing to draw
+ * over it (EXT_shader_framebuffer_fetch, the colour matrix over what is behind: our vibrant program);
+ * a texture of the library's own does not show that, as a copy by the processor did not (glcopy=1).
+ * Boot-arg glblit=0: the surface's memory, as before.
+ */
+static int blit_targets = 1;
 /*
  * A frame that is handed to the display must have been drawn. The display's driver waits for
  * the GPU itself before it puts a surface on the panel, on a thread of its own, and says so in
@@ -487,6 +527,9 @@ image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 		}
 		image = &e->images[e->image_count++];
 	} else {
+		if (image->mirror != 0) {
+			glDeleteTextures(1, &image->mirror);
+		}
 		CFRelease(image->surface);
 	}
 	memset(image, 0, sizeof(*image));
@@ -501,6 +544,9 @@ image_forget(struct eagl *e, GLuint texture)
 	struct image *image = image_of(e, texture);
 
 	if (image != NULL) {
+		if (image->mirror != 0) {
+			glDeleteTextures(1, &image->mirror);
+		}
 		CFRelease(image->surface);
 		*image = e->images[--e->image_count];
 	}
@@ -531,6 +577,36 @@ bytes_a_pixel(GLenum format, GLenum type)
 	default:
 		return 2;                               /* the packed 16-bit kinds */
 	}
+}
+
+/*
+ * For a surface drawn into (blit_targets): a second texture that is the surface's memory, for the
+ * frame to be copied into by the GPU; the texture CoreAnimation draws into stays the library's own.
+ * The texture that is bound is bound again after.
+ */
+static bool
+surface_mirrored(struct eagl *e, struct image *image)
+{
+	IOSurfaceRef surface = image->surface;
+	GLint bound = 0;
+
+	if (!blit_targets || !share_surfaces || !image->target || image->alpha_first ||
+	    image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE || image->plane != 0 ||
+	    (size_t)image->width != IOSurfaceGetWidth(surface) || (size_t)image->height != IOSurfaceGetHeight(surface)) {
+		return false;
+	}
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+	glGenTextures(1, &image->mirror);
+	glBindTexture(GL_TEXTURE_2D, image->mirror);
+	if (!redwood_gl_surface_texture(e->gl, IOSurfaceGetID(surface))) {
+		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+		glDeleteTextures(1, &image->mirror);
+		image->mirror = 0;
+		return false;
+	}
+	glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+	e->shared++;
+	return true;
 }
 
 /*
@@ -676,6 +752,31 @@ target_to_surface(struct eagl *e, struct image *image)
 	uint8_t *base;
 
 	image->drawn = false;
+	if (image->mirror != 0) {
+		GLint read = 0, draw = 0;
+
+		/* the frame into the surface's memory, by the GPU (blit_targets); upside down if it is drawn so */
+		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+		if (e->reader == 0) {
+			glGenFramebuffers(1, &e->reader);
+		}
+		if (e->writer == 0) {
+			glGenFramebuffers(1, &e->writer);
+		}
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
+		glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? image->height : 0, image->width,
+		    image->invert ? 0 : image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+		if (IOSurfaceLock(surface, 0, NULL) == 0) {
+			IOSurfaceUnlock(surface, 0, NULL);
+		}
+		return;
+	}
 	if (image->shared) {
 		/* whoever looks at the surface's seed is to see that it has changed */
 		if (IOSurfaceLock(surface, 0, NULL) == 0) {
@@ -771,6 +872,10 @@ frame_begin(struct eagl *e)
 		trace_left--;
 		eagl_tracing = !trace_placed;
 		trace_placing = trace_placed;
+	} else if (eagl_tracing && trace_placed) {
+		/* (gltrace=FIRST-LAST with gltrace_place: a line a draw for those frames too) */
+		eagl_tracing = 0;
+		trace_placing = 1;
 	}
 	if (eagl_tracing) {
 		eagl_trace("---- frame %u (framebuffer %u)\n", e->frames + 1, e->framebuffer);
@@ -797,6 +902,7 @@ frame_begin(struct eagl *e)
  * glFlush, glFinish: what was drawn must be where the display takes it from. `finished`: the
  * library has been waited for already.
  */
+static void frame_functions(struct eagl *e);
 static void
 frame_end(struct eagl *e, bool finished)
 {
@@ -807,6 +913,11 @@ frame_end(struct eagl *e, bool finished)
 	clear_now(e);
 	before = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
+		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
+			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
+			in_place++;
+			glFlush();                              /* (also after a glFinish: the copy is new since) */
+		}
 		if (e->images[i].target && e->images[i].drawn && e->images[i].shared) {
 			in_place++;
 		}
@@ -815,12 +926,12 @@ frame_end(struct eagl *e, bool finished)
 		glFinish();             /* the display's driver reads the surface as soon as it is told of it */
 	} else if (in_place != 0 && !finished && sync_frames) {
 		/*
-		 * The display's driver waits for the last submission that named the surface -- but Mesa's
-		 * freedreno may still hold the frame's last batch back after glFlush, to merge it with the
-		 * next (submit merging, for small submissions), and then the frame goes to the panel with only
-		 * its earlier batches drawn: the wallpaper without the icons, blocks of an older picture,
-		 * for a frame. A fence that is asked to flush and waited for not at all sends everything held
-		 * back to the kernel now; the GPU is not waited for.
+		 * The display's driver waits for the last submission that named the surface -- and Mesa's
+		 * freedreno may still hold a batch back after glFlush, to merge it with the next (submit
+		 * merging, for small submissions). A fence that is asked to flush and waited for not at all
+		 * sends everything held back to the kernel now; the GPU is not waited for. (Taken once for
+		 * the cause of frames with parts missing; that was drawing into the surface itself, see
+		 * blit_targets.)
 		 */
 		GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 
@@ -858,10 +969,12 @@ frame_end(struct eagl *e, bool finished)
 		 * rest of the surface as it was --; and the draws of the blur whose radius varies.
 		 */
 		say("redwood-gl: f %u at %llu.%03llu s: %u draws, %u clears; display surface %u, %u draws into it, box %s %d,%d %dx%d; "
-		    "vrd %u vrb %u; %u in place, %u copied\n", e->frames, after / 1000000, after / 1000 % 1000, e->draws, e->clears,
-		    e->line.surface, e->line.into_display, e->line.boxed ? "on" : "off", e->line.box[0], e->line.box[1], e->line.box[2],
-		    e->line.box[3], e->line.vrd, e->line.vrb, in_place, copied);
+		    "vrd %u vrb %u; %u in place, %u copied; spans %u solid %u blended, ends %u %u; other %u %u\n", e->frames,
+		    after / 1000000, after / 1000 % 1000, e->draws, e->clears, e->line.surface, e->line.into_display, e->line.boxed ? "on" : "off", e->line.box[0], e->line.box[1],
+		    e->line.box[2], e->line.box[3], e->line.vrd, e->line.vrb, in_place, copied, e->line.solid_spans, e->line.blended_spans,
+		    e->line.solid_ends, e->line.blended_ends, e->line.other_spans, e->line.other_ends);
 		bzero(&e->line, sizeof(e->line));
+		frame_functions(e);
 	}
 	if (in_place == 0 && copied == 0 && e->draws != 0 && unfollowed < 8) {
 		/* (whatever it was drawn into is shown as it is, drawn or not: this is to be seen in the log) */
@@ -900,6 +1013,33 @@ frame_end(struct eagl *e, bool finished)
 	e->last_draws = e->draws;
 	e->calls = e->draws = e->triangles = e->uploads = e->clears = 0;
 	e->upload_bytes = e->attaching = e->flushing = 0;
+}
+
+#ifndef GL_BLEND
+#define GL_BLEND                        0x0be2
+#endif
+/* (glframes=1) a draw of lines, into the display's picture or another: CoreAnimation fills glyphs span by span */
+static void
+count_spans(struct eagl *e, GLenum mode, GLsizei count)
+{
+	struct image *image;
+
+	if (!frame_lines || mode != GL_LINES) {
+		return;
+	}
+	if (e->framebuffer == 0 || e->colour == 0 || (image = image_of(e, e->colour)) == NULL || !image->target ||
+	    image->width < 1000 || image->height < 2000) {
+		e->line.other_spans++;
+		e->line.other_ends += (unsigned)count;
+		return;
+	}
+	if (glIsEnabled(GL_BLEND)) {
+		e->line.blended_spans++;
+		e->line.blended_ends += (unsigned)count;
+	} else {
+		e->line.solid_spans++;
+		e->line.solid_ends += (unsigned)count;
+	}
 }
 
 /* Something is about to be drawn into the framebuffer that is bound. */
@@ -960,6 +1100,13 @@ my_glClear(void *context, GLbitfield mask)
 		eagl_trace("glClear(%#x)\n", mask);
 	}
 	clear_now(e);
+	if ((mask & GL_COLOR_BUFFER_BIT) && e->colour != 0) {
+		struct group_texture *g = group_of(e, e->colour);
+
+		if (g != NULL) {
+			g->state = GROUP_FRESH;         /* (a group about to be drawn: see group_draw_begin()) */
+		}
+	}
 	if (e->colour != 0) {
 		/* what is about to be cleared may be what the next draw reads: see reads_what_it_writes() */
 		e->unclear = mask;
@@ -1776,9 +1923,14 @@ census_name(unsigned function)
 }
 
 /* From inject.c: CoreAnimation asked whether the function it is about to use exists, and was told no. */
+static uint16_t frame_refused[90], frame_noprog[90][CENSUS_KINDS];     /* (glframes=1) this frame's, by function */
+
 void
 redwood_gl_function_refused(unsigned function)
 {
+	if (frame_lines && function < 90) {
+		frame_refused[function]++;
+	}
 	if (census_on && function < 90) {
 		census[function].refused++;
 		census[function].refused_lately++;
@@ -1793,6 +1945,9 @@ census_draw(struct eagl *e, unsigned function, unsigned kind)
 	float low[2] = { 0, 0 }, high[2] = { 0, 0 };
 	size_t used = 0;
 
+	if (frame_lines && function < 90) {
+		frame_noprog[function][kind]++;
+	}
 	if (!census_on || function >= 90) {
 		return;
 	}
@@ -1840,6 +1995,42 @@ census_draw(struct eagl *e, unsigned function, unsigned kind)
 }
 
 /* Every ten seconds: what there was since the last time, and in all. */
+/*
+ * (glframes=1) after a frame's line, when it is not what the frame before had: the functions
+ * CoreAnimation was refused in it, its draws with no program by function and kind (census_kinds[]),
+ * and what was done with groups that hold a vibrant layer (group_draw_begin()).
+ */
+static void
+frame_functions(struct eagl *e)
+{
+	static char said[600];
+	char text[600] = "";
+	size_t used = 0;
+
+	for (unsigned f = 0; f < 90 && used < sizeof(text) - 40; f++) {
+		if (frame_refused[f] != 0) {
+			used += (size_t)snprintf(text + used, sizeof(text) - used, " refused %u %s x%u;", f, census_name(f), frame_refused[f]);
+		}
+		for (unsigned k = 0; k < CENSUS_KINDS; k++) {
+			if (frame_noprog[f][k] != 0 && used < sizeof(text) - 40) {
+				used += (size_t)snprintf(text + used, sizeof(text) - used, " %u %s kind %u x%u;", f, census_name(f), k,
+				    frame_noprog[f][k]);
+			}
+		}
+	}
+	if (group_covered + group_laid + group_flattened != 0 && used < sizeof(text) - 60) {
+		used += (size_t)snprintf(text + used, sizeof(text) - used, " groups: %u covered, %u laid, %u flattened;", group_covered,
+		    group_laid, group_flattened);
+	}
+	group_covered = group_laid = group_flattened = 0;
+	if (used != 0 && strcmp(text, said) != 0) {
+		say("redwood-gl: f %u functions:%s\n", e->frames, text);
+	}
+	memcpy(said, text, used + 1);
+	bzero(frame_refused, sizeof(frame_refused));
+	bzero(frame_noprog, sizeof(frame_noprog));
+}
+
 static void
 census_report(void)
 {
@@ -1973,6 +2164,349 @@ vblur_draw_begin(struct eagl *e, struct vblur_chain *chain, GLint enabled[4])
 		}
 	}
 	return true;
+}
+
+/*
+ * A vibrant layer inside a group. While a layer of Control Center fades in (its opacity below 1),
+ * CoreAnimation draws it and what is in it into a picture of its own, a group, and lays that over
+ * the screen at the layer's opacity; at 1 it draws them straight onto the screen. The round
+ * buttons of the connectivity module and the "Not Playing" title are vibrant: function 45 ("vcm",
+ * our program for a colour matrix over what is behind, which reads the picture it draws into),
+ * and in a group what is behind them is the group's picture, cleared to nothing: the colour matrix
+ * of nothing is nothing, and they were missing from the screen until the fade was over, the
+ * buttons' discs and the title coming in at once some half a second after the rest.
+ *
+ * So a vibrant draw into a group that holds nothing yet keeps there what it covers (its layer's
+ * opacity times its mask), and the matrix with it; when that group is laid over the screen (or
+ * over another picture with something in it), our program puts the matrix over what is there
+ * by that coverage times the group's opacity -- which is what the group would have given had it
+ * been started from what is behind it, and what the draw at full opacity gives. A group that
+ * holds a vibrant layer's coverage and is then drawn into, or read any other way, is first made
+ * what it would have been (the colour matrix of nothing, by the coverage). A group laid into
+ * another group that holds nothing yet passes its coverage on. Boot-arg glgroup=0: as before.
+ */
+
+static const char group_cover_fragment[] =
+    "#version 300 es\n"
+    "uniform lowp sampler2D texture0;\n"
+    "uniform highp vec4 texmat;\n"
+    "in lowp vec4 color;\n"
+    "in highp vec2 texcoord;\n"
+    "out lowp vec4 result;\n"
+    "void main() {\n"
+    "  result = color * texture(texture0, texcoord * texmat.xy + texmat.zw);\n"
+    "}\n";
+static const char group_over_fragment[] =
+    "#version 300 es\n"
+    "#extension GL_EXT_shader_framebuffer_fetch : require\n"
+    "uniform lowp sampler2D texture0;\n"
+    "uniform highp vec4 texmat;\n"
+    "uniform mediump vec4 colours[5];\n"
+    "in lowp vec4 color;\n"
+    "in highp vec2 texcoord;\n"
+    "layout(location = 0) inout highp vec4 result;\n"
+    "void main() {\n"
+    "  mediump vec4 layer = color * texture(texture0, texcoord * texmat.xy + texmat.zw);\n"
+    "  mediump vec4 behind = result, s = behind;\n"
+    "  s.rgb = s.rgb / max(s.a, .005);\n"
+    "  s = s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4];\n"
+    "  s.a = clamp(s.a, 0., 1.);\n"
+    "  s.rgb = clamp(s.rgb * s.a, 0., 1.);\n"
+    "  result = mix(behind, s, layer.a);\n"
+    "}\n";
+static const char group_flat_fragment[] =
+    "#version 300 es\n"
+    "#extension GL_EXT_shader_framebuffer_fetch : require\n"
+    "uniform mediump vec4 flat_colour;\n"
+    "layout(location = 0) inout highp vec4 result;\n"
+    "void main() {\n"
+    "  result = flat_colour * result.a;\n"
+    "}\n";
+
+#ifndef GL_BLEND_SRC_ALPHA
+#define GL_BLEND_SRC_ALPHA              0x80cb
+#define GL_BLEND_DST_ALPHA              0x80ca
+#endif
+#define GL_ONE                          1
+#define GL_ONE_MINUS_SRC_ALPHA          0x0303
+
+static GLfloat
+clamp01(GLfloat value)
+{
+	return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/* The state of a texture of CoreAnimation's own (not one that stands for an IOSurface), or NULL. */
+static struct group_texture *
+group_of(struct eagl *e, GLuint texture)
+{
+	if (!group_vibrant_on || texture == 0 || texture >= GROUP_TEXTURES || image_of(e, texture) != NULL) {
+		return NULL;
+	}
+	if (e->groups == NULL && (e->groups = calloc(GROUP_TEXTURES, sizeof(*e->groups))) == NULL) {
+		return NULL;
+	}
+	return &e->groups[texture];
+}
+
+/* Our programs for it, made the first time. */
+static bool
+group_programs(struct eagl *e)
+{
+	GLint good = 0, good2 = 0, good3 = 0;
+
+	if (e->group_cover != 0 || e->group_failed) {
+		return !e->group_failed;
+	}
+	e->group_cover = plain_program(group_cover_fragment, "a vibrant layer's coverage, in a group");
+	e->group_over = plain_program(group_over_fragment, "a group's vibrant layer over what is behind it");
+	e->group_flat = plain_program(group_flat_fragment, "a group's vibrant layer as it would have been");
+	glGetProgramiv(e->group_cover, GL_LINK_STATUS, &good);
+	glGetProgramiv(e->group_over, GL_LINK_STATUS, &good2);
+	glGetProgramiv(e->group_flat, GL_LINK_STATUS, &good3);
+	e->group_failed = !good || !good2 || !good3;
+	e->group_cover_matrix = glGetUniformLocation(e->group_cover, "vertex_matrix");
+	e->group_cover_texmat = glGetUniformLocation(e->group_cover, "texmat");
+	e->group_over_matrix = glGetUniformLocation(e->group_over, "vertex_matrix");
+	e->group_over_texmat = glGetUniformLocation(e->group_over, "texmat");
+	e->group_over_colours = glGetUniformLocation(e->group_over, "colours");
+	e->group_flat_matrix = glGetUniformLocation(e->group_flat, "vertex_matrix");
+	e->group_flat_colour = glGetUniformLocation(e->group_flat, "flat_colour");
+	return !e->group_failed;
+}
+
+/*
+ * A group that holds a vibrant layer's coverage made what CoreAnimation drew into it: the colour
+ * matrix of nothing (its numbers added, opacity and all), by the coverage. Drawn through a
+ * framebuffer of ours, the whole texture; everything of CoreAnimation's put back after.
+ */
+static void
+group_flatten(struct eagl *e, GLuint texture, struct group_texture *g)
+{
+	static const GLfloat identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+	static const GLfloat corners[8] = { -1, -1, 1, -1, -1, 1, 1, 1 };
+	GLint view[4], box[4], width = 0, height = 0, enabled[3];
+	GLboolean scissored, blending;
+	GLfloat flat[4], alpha = clamp01(g->colours[19]);
+
+	g->state = GROUP_NONE;
+	group_flattened++;
+	flat[3] = alpha;
+	for (int i = 0; i < 3; i++) {
+		flat[i] = clamp01(g->colours[16 + i] * alpha);
+	}
+	glGetIntegerv(GL_VIEWPORT, view);
+	glGetIntegerv(GL_SCISSOR_BOX, box);
+	scissored = glIsEnabled(GL_SCISSOR_TEST);
+	blending = glIsEnabled(GL_BLEND);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+	glBindTexture(GL_TEXTURE_2D, e->bound[0]);
+	glActiveTexture(GL_TEXTURE0 + e->unit);
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+	glViewport(0, 0, width, height);
+	glDisable(GL_SCISSOR_TEST);
+	if (flat[3] == 0) {
+		GLfloat colour[4];
+
+		/* (nothing by any coverage is nothing: the numbers add no opacity, as they do not in Control Center) */
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, colour);
+		glClearColor(0, 0, 0, 0);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glClearColor(colour[0], colour[1], colour[2], colour[3]);
+	} else if (group_programs(e)) {
+		glDisable(GL_BLEND);
+		glUseProgram(e->group_flat);
+		glUniformMatrix4fv(e->group_flat_matrix, 1, 0, identity);
+		glUniform4fv(e->group_flat_colour, 1, flat);
+		for (GLuint i = 0; i < 3; i++) {
+			glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled[i]);
+		}
+		glDisableVertexAttribArray(1);
+		glDisableVertexAttribArray(2);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, 0, 0, corners);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		glVertexAttribPointer(0, e->arrays[0].size, e->arrays[0].type, 0, e->arrays[0].stride, e->arrays[0].pointer);
+		for (GLuint i = 0; i < 3; i++) {
+			(enabled[i] ? glEnableVertexAttribArray : glDisableVertexAttribArray)(i);
+		}
+		glUseProgram(e->program);
+		(blending ? glEnable : glDisable)(GL_BLEND);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, e->framebuffer);
+	glViewport(view[0], view[1], view[2], view[3]);
+	glScissor(box[0], box[1], box[2], box[3]);
+	(scissored ? glEnable : glDisable)(GL_SCISSOR_TEST);
+}
+
+/* A texture's contents are made anew (an upload, a copy into it): whatever it held is gone. */
+static void
+group_forget(struct eagl *e, GLuint texture)
+{
+	struct group_texture *g = e->groups != NULL && texture < GROUP_TEXTURES ? &e->groups[texture] : NULL;
+
+	if (g != NULL) {
+		g->state = GROUP_NONE;
+	}
+}
+
+/* A texture is about to be read other than by a draw that lays a group over a picture: it is made what it would have been. */
+static void
+group_read(struct eagl *e, GLuint texture)
+{
+	struct group_texture *g = e->groups != NULL && texture != 0 && texture < GROUP_TEXTURES ? &e->groups[texture] : NULL;
+
+	if (g != NULL && g->state == GROUP_VIBRANT) {
+		group_flatten(e, texture, g);
+	}
+}
+
+/* CoreAnimation's own uniform of its program in use, by name (a matrix of 16 numbers, or a vector of 4); false if it has none. */
+static bool
+group_uniform(struct eagl *e, const char *name, GLfloat *values)
+{
+	GLint location = glGetUniformLocation(e->program, name);
+
+	if (location < 0) {
+		return false;
+	}
+	glGetUniformfv(e->program, location, values);
+	return true;
+}
+
+/*
+ * Before a draw: is it one of the above, and if so, set up for it (the draw itself is CoreAnimation's,
+ * with its arrays). Returns 0 for a draw left as it is, 1 for one of ours (group_draw_end() after it).
+ */
+static int
+group_draw_begin(struct eagl *e, GLint enabled[4])
+{
+	static const GLfloat identity[16] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+	static uint8_t said[90];
+	unsigned function = ca_context != NULL ? *(*(uint8_t **)((char *)ca_context + 0x10) + 0x10) : 90;
+	struct group_texture *into = group_of(e, e->colour), *from = NULL;
+	const GLfloat *colours = NULL;
+	GLfloat matrix[16], texmat[4] = { 1, 1, 0, 0 };
+	bool cover;
+
+	if (!group_vibrant_on || e->colour == 0 || e->framebuffer == 0) {
+		return 0;
+	}
+	if (e->program == 0 && function == FUNCTION_VIBRANT_MATRIX && fetch_offered && function_given[function] == 20 &&
+	    e->bound[0] != 0 && e->bound[0] != e->colour && into != NULL && (into->state == GROUP_FRESH ||
+	    (into->state == GROUP_VIBRANT && memcmp(into->colours, function_values[function], sizeof(into->colours)) == 0))) {
+		/* a vibrant layer drawn into a group with nothing in it: its coverage */
+		GLint width = 1, height = 1;
+
+		glActiveTexture(GL_TEXTURE0);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+		glActiveTexture(GL_TEXTURE0 + e->unit);
+		texmat[0] = 1.f / (GLfloat)(width > 0 ? width : 1);
+		texmat[1] = 1.f / (GLfloat)(height > 0 ? height : 1);
+		memcpy(matrix, e->matrix != NULL ? e->matrix : identity, sizeof(matrix));
+		colours = function_values[function];
+		cover = true;
+	} else if (e->program != 0 && e->bound[0] != 0 && e->bound[0] != e->colour && (from = group_of(e, e->bound[0])) != NULL &&
+	    from->state == GROUP_VIBRANT) {
+		/* a group that holds a vibrant layer laid over something */
+		bool laid = function == 1 || function == 3;    /* ("img", "cim": the picture as it is, by the colour) */
+
+		if (function < 90 && !said[function]) {
+			said[function] = 1;
+			say("redwood-gl: a group that holds a vibrant layer is drawn with CoreAnimation's function %u (\"%s\"): %s\n",
+			    function, census_name(function), laid ? "the layer over what is behind it" : "made what it would have been");
+		}
+		if (!laid || !group_uniform(e, "vertex_matrix", matrix)) {
+			group_flatten(e, e->bound[0], from);
+			from = NULL;
+		} else {
+			if (!group_uniform(e, "texmat0", texmat)) {
+				texmat[0] = texmat[1] = 1;
+			}
+			colours = from->colours;
+			cover = into != NULL && (into->state == GROUP_FRESH ||
+			    (into->state == GROUP_VIBRANT && memcmp(into->colours, colours, sizeof(into->colours)) == 0));
+		}
+	}
+	if (colours == NULL || !group_programs(e)) {
+		/* not one of ours: what it reads is what CoreAnimation drew, and what it draws into is no longer a
+		 * vibrant layer's coverage, nor empty */
+		for (unsigned unit = 0; unit < 4 && e->groups != NULL; unit++) {
+			group_read(e, e->bound[unit]);
+		}
+		if (into != NULL) {
+			if (into->state == GROUP_VIBRANT) {
+				group_flatten(e, e->colour, into);
+			}
+			into->state = GROUP_NONE;
+		}
+		return 0;
+	}
+	clear_now(e);
+	if (cover) {
+		glUseProgram(e->group_cover);
+		glUniformMatrix4fv(e->group_cover_matrix, 1, 0, matrix);
+		glUniform4fv(e->group_cover_texmat, 1, texmat);
+		e->group_blend = glIsEnabled(GL_BLEND);
+		glGetIntegerv(GL_BLEND_SRC_RGB, &e->group_blend_func[0]);
+		glGetIntegerv(GL_BLEND_DST_RGB, &e->group_blend_func[1]);
+		glGetIntegerv(GL_BLEND_SRC_ALPHA, &e->group_blend_func[2]);
+		glGetIntegerv(GL_BLEND_DST_ALPHA, &e->group_blend_func[3]);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		if (into->state != GROUP_VIBRANT) {
+			memcpy(into->colours, colours, sizeof(into->colours));
+		}
+		into->state = GROUP_VIBRANT;
+		group_covered++;
+	} else {
+		glUseProgram(e->group_over);
+		glUniformMatrix4fv(e->group_over_matrix, 1, 0, matrix);
+		glUniform4fv(e->group_over_texmat, 1, texmat);
+		glUniform4fv(e->group_over_colours, 5, colours);
+		e->group_blend = glIsEnabled(GL_BLEND);
+		glGetIntegerv(GL_BLEND_SRC_RGB, &e->group_blend_func[0]);
+		glGetIntegerv(GL_BLEND_DST_RGB, &e->group_blend_func[1]);
+		glGetIntegerv(GL_BLEND_SRC_ALPHA, &e->group_blend_func[2]);
+		glGetIntegerv(GL_BLEND_DST_ALPHA, &e->group_blend_func[3]);
+		glDisable(GL_BLEND);            /* (the program blends) */
+		if (into != NULL) {
+			if (into->state == GROUP_VIBRANT) {
+				group_flatten(e, e->colour, into);
+			}
+			into->state = GROUP_NONE;
+		}
+		group_laid++;
+	}
+	for (GLuint i = 0; i < 3; i++) {
+		glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled[i]);
+		if (!enabled[i]) {
+			glEnableVertexAttribArray(i);
+		}
+	}
+	return 1;
+}
+
+static void
+group_draw_end(struct eagl *e, const GLint enabled[4])
+{
+	for (GLuint i = 0; i < 3; i++) {
+		if (!enabled[i]) {
+			glDisableVertexAttribArray(i);
+		}
+	}
+	(e->group_blend ? glEnable : glDisable)(GL_BLEND);
+	glBlendFuncSeparate((GLenum)e->group_blend_func[0], (GLenum)e->group_blend_func[1], (GLenum)e->group_blend_func[2],
+	    (GLenum)e->group_blend_func[3]);
+	glUseProgram(e->program);
 }
 
 static bool
@@ -2234,6 +2768,7 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 
 	EAGL_ENTER(e, 0x210);
 	drawing(e);
+	count_spans(e, mode, count);
 	e->draws++;
 	e->triangles += triangles_of(mode, count);
 	if (eagl_tracing) {
@@ -2243,10 +2778,15 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 	if (trace_placing) {
 		trace_placed_draw(e, mode, 0, NULL, first, count);
 	}
-	plain = plain_draw_begin(e, enabled);
-	glDrawArrays(mode, first, count);
-	if (plain) {
-		plain_draw_end(e, enabled);
+	if (group_draw_begin(e, enabled)) {
+		glDrawArrays(mode, first, count);
+		group_draw_end(e, enabled);
+	} else {
+		plain = plain_draw_begin(e, enabled);
+		glDrawArrays(mode, first, count);
+		if (plain) {
+			plain_draw_end(e, enabled);
+		}
 	}
 	if (trace_listed) {
 		trace_placed_look(e);
@@ -2266,6 +2806,7 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 
 	EAGL_ENTER(e, 0x220);
 	drawing(e);
+	count_spans(e, mode, count);
 	e->draws++;
 	e->triangles += triangles_of(mode, count);
 	if (eagl_tracing) {
@@ -2275,10 +2816,15 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	if (trace_placing) {
 		trace_placed_draw(e, mode, type, indices, 0, count);
 	}
-	plain = plain_draw_begin(e, enabled);
-	glDrawElements(mode, count, type, indices);
-	if (plain) {
-		plain_draw_end(e, enabled);
+	if (group_draw_begin(e, enabled)) {
+		glDrawElements(mode, count, type, indices);
+		group_draw_end(e, enabled);
+	} else {
+		plain = plain_draw_begin(e, enabled);
+		glDrawElements(mode, count, type, indices);
+		if (plain) {
+			plain_draw_end(e, enabled);
+		}
 	}
 	if (trace_listed) {
 		trace_placed_look(e);
@@ -2347,6 +2893,7 @@ my_glDeleteTextures(void *context, GLsizei n, const GLuint *textures)
 	for (GLsizei i = 0; i < n; i++) {
 		image_forget(e, textures[i]);
 		vblur_forget(e, textures[i]);
+		group_forget(e, textures[i]);
 		if (textures[i] == e->colour) {
 			e->colour = 0;          /* (a texture that is deleted leaves the framebuffer bound) */
 		}
@@ -2422,6 +2969,9 @@ my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsiz
 		}
 	}
 	clear_now(e);
+	if (target == GL_TEXTURE_2D && e->unit < 8) {
+		group_forget(e, e->bound[e->unit]);
+	}
 	uint64_t began = slow_calls_us != 0 ? now_us() : 0;
 	glTexImage2D(target, level, (GLint)internal_format((GLenum)internal, format), width, height, border, format, type, pixels);
 	if (began != 0 && now_us() - began >= slow_calls_us) {
@@ -2430,6 +2980,50 @@ my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsiz
 		    pixels ? "" : " (empty)", now_us() - began, began);
 	}
 	EAGL_LEAVE(e, 0x970);
+}
+
+/* An upload into part of a texture: a group with a vibrant layer in it is made what it would have been first. */
+static void
+my_glTexSubImage2D(void *context, GLenum target, GLint level, GLint x, GLint y, GLsizei width, GLsizei height, GLenum format,
+    GLenum type, const void *pixels)
+{
+	struct eagl *e = context;
+
+	EAGL_ENTER(e, 0x9a0);
+	if (eagl_tracing) {
+		eagl_trace("glTexSubImage2D(%#x, %d, %d, %d, %d, %d, %#x, %#x, %p)\n", target, level, x, y, width, height, format, type,
+		    pixels);
+	}
+	clear_now(e);
+	if (target == GL_TEXTURE_2D && e->unit < 8 && e->groups != NULL) {
+		group_read(e, e->bound[e->unit]);
+		group_forget(e, e->bound[e->unit]);
+	}
+	glTexSubImage2D(target, level, x, y, width, height, format, type, pixels);
+	EAGL_LEAVE(e, 0x9a0);
+}
+
+/* A copy of what is drawn into a texture: both made what they would have been first (see group_draw_begin()). */
+static void
+my_glCopyTexSubImage2D(void *context, GLenum target, GLint level, GLint x0, GLint y0, GLint x, GLint y, GLsizei width,
+    GLsizei height)
+{
+	struct eagl *e = context;
+
+	EAGL_ENTER(e, 0x1c8);
+	if (eagl_tracing) {
+		eagl_trace("glCopyTexSubImage2D(%#x, %d, %d, %d, %d, %d, %d, %d)\n", target, level, x0, y0, x, y, width, height);
+	}
+	clear_now(e);
+	if (e->groups != NULL) {
+		group_read(e, e->colour);
+		if (target == GL_TEXTURE_2D && e->unit < 8) {
+			group_read(e, e->bound[e->unit]);
+			group_forget(e, e->bound[e->unit]);
+		}
+	}
+	glCopyTexSubImage2D(target, level, x0, y0, x, y, width, height);
+	EAGL_LEAVE(e, 0x1c8);
 }
 
 static void
@@ -2911,7 +3505,7 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	 * around, to be shown): a texture that is not the surface's memory starts with what the surface holds.
 	 */
 	began = now_us();
-	if (!surface_shared(e, image)) {
+	if (surface_mirrored(e, image) || !surface_shared(e, image)) {
 		surface_changed(e, image);              /* (what it adds up to now) */
 		surface_to_texture(e, image);
 	}
@@ -2919,7 +3513,8 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	if (attached++ < 24) {
 		say("redwood-gl: -attachImage: texture %d is IOSurface %u ('%.4s' %d x %d, %zu bytes a row)%s%s\n", texture,
 		    IOSurfaceGetID(surface), (const char *)&(uint32_t){ __builtin_bswap32(pixels) }, image->width, image->height,
-		    IOSurfaceGetBytesPerRow(surface), inverted ? ", drawn inverted" : "", image->shared ? ": its memory" : ": a copy");
+		    IOSurfaceGetBytesPerRow(surface), inverted ? ", drawn inverted" : "", image->shared ? ": its memory" :
+		    image->mirror != 0 ? ": a texture, copied into its memory by the GPU" : ": a copy");
 	}
 	eagl_leave(e, 0x970);
 	return YES;
@@ -3014,6 +3609,7 @@ install(void)
 		trace_lit = strstr(arguments, "gltrace_lit=1") != NULL;
 		trace_look = strstr(arguments, "gltrace_look=1") != NULL;
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
+		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
 
@@ -3039,6 +3635,7 @@ install(void)
 			shown_texture = (GLuint)strtoul(argument + 7, NULL, 10);
 		}
 		share_surfaces = strstr(arguments, "glcopy=1") == NULL;
+		blit_targets = strstr(arguments, "glblit=0") == NULL;
 		sync_frames = strstr(arguments, "glsync=0") == NULL;
 		if (strstr(arguments, "glwait=0") != NULL || (strstr(arguments, "glwait=1") == NULL && display_waits())) {
 			wait_for_frames = 0;

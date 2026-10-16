@@ -49,7 +49,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 4427401..09d3585 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,32 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,33 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -71,6 +71,7 @@ index 4427401..09d3585 100644
 +bsd/dev/redwood_guard.c		standard
 +bsd/dev/redwood_haptic.c		standard
 +bsd/dev/redwood_torch.c		standard
++bsd/dev/redwood_camera.c	standard
 +bsd/dev/redwood_mic.c		standard
 +bsd/dev/redwood_wifi.c		standard
 +bsd/dev/redwood_adsp.c		standard
@@ -82,7 +83,7 @@ index 4427401..09d3585 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +181,10 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +182,10 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -93,7 +94,7 @@ index 4427401..09d3585 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +391,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +392,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -101,7 +102,7 @@ index 4427401..09d3585 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +414,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +415,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -534,7 +535,32 @@ index 1d71c66..024ead8 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
-@@ -7538,6 +7676,11 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -6636,7 +6774,23 @@ handle_mac_transition:
+ 	}
+ 
+ 	/* Update the process' identity version and set the security token */
+-	proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
++	{
++		/*
++		 * (redwood) Except when xpcproxy becomes the service it was spawned for: then the process keeps
++		 * xpcproxy's identity version, as if launchd had spawned the service itself, which is what launchd
++		 * means by eliding xpcproxy ("service will attempt to elide xpcproxy"; here it spawns xpcproxy
++		 * all the same). RunningBoard keeps the audit token of such a process from before the exec and
++		 * never takes the newer one: every entitlement check it made for it failed (SecTaskLoadEntitlements
++		 * error 3, a thousand times a minute with Safari open), and Safari's web processes got no
++		 * assertions ("target is not running or doesn't have entitlement
++		 * com.apple.runningboard.assertions.webkit"). Boot-arg xpcproxy_idversion=1: a new version, as XNU.
++		 */
++		static TUNABLE(uint32_t, xpcproxy_idversion, "xpcproxy_idversion", 0);
++
++		if (xpcproxy_idversion || strncmp(p->p_comm, "xpcproxy", sizeof(p->p_comm)) != 0) {
++			proc_setpidversion(p, OSIncrementAtomic(&nextpidversion));
++		}
++	}
+ 	task_set_uniqueid(task);
+ 	set_security_token_task_internal(p, task);
+ 
+@@ -7538,6 +7692,11 @@ process_signature(proc_t p, struct image_params *imgp)
  	}
  
  done:

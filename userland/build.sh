@@ -123,14 +123,21 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -framework CoreFoundation -framework AudioToolbox -framework AVFoundation -lobjc -o obj/sound_test src/sound_test.c
 		$DYN -framework CoreFoundation -lMobileGestalt -o obj/mg_test src/mg_test.c
 		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/torch_test src/torch_test.c
+		$DYN -O2 -o obj/camera_test src/camera_test.c src/camera_isp.c
+		$DYN -fobjc-arc -framework Foundation -framework AVFoundation -o obj/camera_avtest src/camera_avtest.m
+		# (the microphone as an application records: allowed to, by an entitlement, if ldid is there)
+		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/record_test src/record_test.c &&
+			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
+			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
 		$DYN -o obj/cpu_test src/cpu_test.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework IOSurface -o obj/cg_test src/cg_test.c
 		$DYN -o obj/shm_test src/shm_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
+		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
 		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
-		$DYN -framework CoreFoundation -framework IOKit -o obj/battery_test src/battery_test.c &&
+		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
 			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
 			  echo "build.sh: no ldid: battery_test is unsigned, and SpringBoard will not open URLs for it"; }
 		# (the keychain answers only a program that has a keychain access group: signed with one, if ldid is there)
@@ -146,8 +153,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			-o obj/libredwood.dylib src/inject.c
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libredwood-sb.dylib src/inject_sb.c
-		$DYN -dynamiclib -install_name /redwood/lib/libredwood-media.dylib -framework CoreFoundation -lobjc \
-			-o obj/libredwood-media.dylib src/inject_media.c
+		$DYN -O2 -dynamiclib -install_name /redwood/lib/libredwood-media.dylib -framework CoreFoundation -framework CoreMedia \
+			-framework CoreVideo -framework IOSurface -lobjc \
+			-o obj/libredwood-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
 		# the output device of the audio server: a plug-in for CoreAudio's HAL
 		$DYN -bundle -framework CoreFoundation -o obj/RedwoodAudio src/audio_plugin.c
 		if [ -n "$GL" ]; then
@@ -170,12 +178,16 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
 	[ -f obj/shm_test ] && cp obj/shm_test root/bin/
 	[ -f obj/snap_test ] && cp obj/snap_test root/bin/
+	[ -f obj/font_test ] && cp obj/font_test root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
+	[ -f obj/camera_test ] && cp obj/camera_test root/bin/
+	[ -f obj/camera_avtest ] && cp obj/camera_avtest root/bin/
+	[ -f obj/record_test ] && cp obj/record_test root/bin/
 	for f in $EXTRA; do cp "$f" root/bin/; done
 	mkdir -p root/lib
 	cp obj/libredwood.dylib obj/libredwood-sb.dylib root/lib/
@@ -247,6 +259,16 @@ if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
 fi
+# ... and the cameras' register tables (bsd/dev/redwood_camera.c, cam=2 and up), made by tools/camsensor.py out of
+# the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
+# redwood_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the
+# repository): camera-<sensor>.tab
+for module in ../fw-camera/com.qti.sensormodule.redwood_*.bin; do
+	[ -f "$module" ] || continue
+	sensor=$(basename "$module" .bin | sed 's/^com\.qti\.sensormodule\.redwood_[a-z]*_\([a-z0-9]*\)_.*/\1/')
+	mkdir -p root/fw
+	../tools/camsensor.py "$module" "root/fw/camera-$sensor.tab" >/dev/null
+done
 # ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (bsd/dev/redwood_adsp.c):
 # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
 # the loader takes.
