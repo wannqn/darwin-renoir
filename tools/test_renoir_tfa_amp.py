@@ -25,7 +25,8 @@ static void preserved(void){assert(regs[0xf0]==3 && regs[0xf5]==6232);assert((re
 int main(void){
  assert(rtfa_status_healthy(0x56,0x8044,0x810f,0x100,true)); /* actual muted idle */
  assert(rtfa_status_healthy(0x56,0xc044,0x810f,40,true)); /* active PWM */
- assert(!rtfa_status_healthy(0x56,0xc044,0x810f,0x100,true)); /* ADC invalid while active */
+ assert(rtfa_status_healthy(0x56,0xc044,0x810f,0x100,true)); /* observed active-PWM ADC transition is not a fault */
+ assert(!rtfa_status_healthy(0x52,0xc044,0x810f,0x100,true)); /* real OTDS fault still trips with unavailable ADC */
  assert(!rtfa_status_healthy(0x56,0xc044,0x810f,81,true));
  for(unsigned b=0;b<16;b++) {
   if(0x54&(1u<<b))assert(!rtfa_status_healthy(0x56&~(1u<<b),0xc044,0x810f,40,true));

@@ -6,13 +6,14 @@
 #include "renoir_tfa_container.h"
 /* OTDS/UVDS/OVDS and individual OCPOK bits are asserted when healthy,
  * as in OKX tfa_status(). AMPS can be off while zero samples invoke idle.
- * TEMPS=0x100 is the powered-down ADC sentinel, not -256 degrees measured.
+ * TEMPS=0x100 is an unavailable ADC reading, including during PWM transitions.
+ * It is not a thermal alarm; OTDS is checked independently even then.
  */
 static inline bool rtfa_status_healthy(uint16_t status,uint16_t amp,uint16_t extra,uint16_t temp,bool operating) {
     int c=temp&0x1ff;if(c&0x100)c-=512;
     if((status&0x54)!=0x54 || (status&0x520) || !(amp&0x40) ||
        (extra&0x10f)!=0x10f || (operating && !(extra&0x8000)))return false;
-    if((temp&0x1ff)==0x100)return !(amp&0x4000);
+    if((temp&0x1ff)==0x100)return true;
     return c>=-40 && c<=80;
 }
 struct rtfa_bus {bool (*read)(uint8_t,uint8_t,uint16_t*);bool (*write)(uint8_t,uint8_t,uint16_t);};

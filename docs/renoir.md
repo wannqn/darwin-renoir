@@ -769,3 +769,10 @@ After Windows disk exhaustion, regenerated the kernel from a clean build and rep
 Physical cold RAM boot of the rebuilt loader/kernel/userland reached iOS. Automatic AudioQueue test delivered144000/144000 frames; both amplifier starts and idle stops succeeded. DHCP acquired192.168.1.186, HTTPS example.com returned200/577bytes in0.21s and DNS resolved. DSP battery reporting showed85%,4030mV,596mA,33C and external charging. The user confirmed audible sound and that Settings Battery opens without hanging. Evidence: logs/phone-main08-*.log. The first90second QEMU run reached SpringBoard and the window server and returned normally; its sequential audio/network test did not finish, so no full QEMU network pass is claimed.
 
 The300second QEMU regression also completed with a normal return after SpringBoard/window-server startup and no kernel panic. The audio-readiness wait prevented completion of its sequential network scenario; phone HTTPS/DNS results above remain the network validation. Log: logs/qemu-renoir-main-08dd6f1-long.log.
+
+
+### Speaker restart after idle: unavailable temperature reading
+
+During browser playback the TFA9873 could transiently report TEMPS=0x100 while PWM was active, with normal clock/PLL/voltage/overcurrent/thermal status. The old check classified that unavailable reading as a fault, causing the shared sound watch to latch off until reboot. This affected every subsequent sound, including SoundCloud and YouTube.
+
+The status decoder now treats the sentinel as an unavailable measurement after checking all hardware fault bits. Valid temperatures outside the existing range still fail; thermal faults still fail even with an unavailable reading. Host regression covers both cases. The user confirmed browser music and playback after a ten-second pause on the corrected kernel. Evidence: logs/phone-browser-audio.log (failure), logs/phone-audio-adc-*.log and logs/phone-adc-confirmed-browser.log (corrected playback).
