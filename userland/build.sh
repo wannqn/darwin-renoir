@@ -269,6 +269,13 @@ for module in ../fw-camera/com.qti.sensormodule.redwood_*.bin; do
 	mkdir -p root/fw
 	../tools/camsensor.py "$module" "root/fw/camera-$sensor.tab" >/dev/null
 done
+# Renoir tables have a board prefix; the camera driver never substitutes Redwood tables.
+for module in ../fw-camera/renoir/com.qti.sensormodule.renoir_*.bin; do
+    [ -f "$module" ] || continue
+    sensor=$(basename "$module" .bin | sed 's/^com\.qti\.sensormodule\.renoir_[a-z]*_\([a-z0-9]*\)_.*/\1/')
+    mkdir -p root/fw
+    ../tools/camsensor.py "$module" "root/fw/camera-renoir-$sensor.tab" >/dev/null
+done
 # ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (bsd/dev/redwood_adsp.c):
 # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
 # the loader takes.

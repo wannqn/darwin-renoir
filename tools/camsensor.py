@@ -46,6 +46,17 @@ def symbols(data):
     return syms, order, pool
 
 
+def sensor_driver_words(value, syms, order):
+    """The module's root can wrap the driver; its named symbol gives the offset."""
+    sid = next((s for s in order if syms[s][0] == 'sensorDriverData'), None)
+    if sid is None:
+        raise ValueError('missing sensorDriverData')
+    driver = value(sid)
+    if len(driver) < 80:
+        raise ValueError('truncated sensorDriverData')
+    return struct.unpack_from('<20I', driver)
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
@@ -63,7 +74,7 @@ def main():
         return struct.unpack('<%dI' % (len(v) // 4), v)
 
     # the sensor driver's structure: slave address, address/data bytes of the id read, id address, id, mask, power sequences
-    driver = struct.unpack_from('<20I', data, pool)
+    driver = sensor_driver_words(value, syms, order)
     slave, address_bytes, data_bytes, id_address, chip_id, id_mask = driver[7], driver[8], driver[9], driver[10], driver[11], \
         driver[12]
     power = {}
@@ -149,4 +160,5 @@ def regsetting(data, pool, syms, value, sid):
     return writes
 
 
-main()
+if __name__ == '__main__':
+    main()

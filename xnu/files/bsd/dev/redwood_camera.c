@@ -24,7 +24,7 @@
  *                  voltages, normal power mode for the load Android asks). The PM8008i is on the
  *                  serial engine 1's I2C (GPIO 4 data, 5 clock; addresses 0x08 for the chip, 0x09
  *                  for the regulators, 16-bit registers), done by hand too; its reset pin is
- *                  PM8350C GPIO 3 (output high, as Android's pinctrl "pm8008i_active" has it)
+ *                  PM8350C PM8008 reset GPIO (output high, as Android's pinctrl "pm8008i_active" has it)
  *   power-up       (the module file's): reset low, 1 ms; VDIG on; VANA on, 2 ms; MCLK on, 4 ms;
  *                  reset high, 9 ms. Power-down: MCLK off; reset low, 1 ms; VANA off, 7 ms; VDIG off.
  *                  (Both are read from the sensor's table at run time, as the wide one's are.)
@@ -90,6 +90,7 @@ extern kern_return_t thread_terminate(thread_t thread);
 extern void loader_log_putc(char c);
 
 static uint32_t level;
+static bool camera_renoir;
 static bool broken, leaving;
 
 static int say(const char *format, ...) __printflike(1, 2);
@@ -167,8 +168,8 @@ give_up(const char *why)
 #define CFG_FUNCTION(f)         ((uint32_t)(f) << 2)
 #define CFG_DRIVE_MA(ma)        ((uint32_t)((ma) / 2 - 1) << 6)
 
-#define PIN_PMIC_SDA            4       /* the serial engine 1's I2C: the PM8008i */
-#define PIN_PMIC_SCL            5
+#define PIN_PMIC_SDA            (camera_renoir ? 0u : 4u)       /* the serial engine 1's I2C: the PM8008i */
+#define PIN_PMIC_SCL            (camera_renoir ? 1u : 5u)
 
 static vm_offset_t tlmm;
 
@@ -194,26 +195,27 @@ struct sensor_hw {
 	unsigned        sda, scl, reset;
 	uint32_t        mclk_cmd, mclk_cbcr;
 	unsigned        mclk_pin;
-	struct supply   vana, vdig, vio;
+	struct supply   vana, vdig, vio, vaf;
 	unsigned        csiphy;
 	uint32_t        phy_cbcr, timer_cmd, timer_cbcr;
 	uint8_t         regs;           /* the exposure registers: REGS_OV_PAGED, REGS_SMIA or REGS_OV16 */
 	uint8_t         bayer;          /* the picture's order as it comes here (camraw.py's codes: 0 RGGB, 2 GBRG) */
 	uint8_t         pattern_bayer;  /* ... and its own colour bars' (its module file's "tpgon") */
 	const char *    chip;           /* for the frames' header */
+	uint16_t        gain_unity, gain_max;   /* the analog gain register's 1x, and the most it is given */
 };
 enum {
 	REGS_OV_PAGED,                  /* OmniVision, 8-bit registers in pages (0xfd): exposure 0x0e/0x0f, gain 0x22, VTS 0x14/0x15 */
 	REGS_SMIA,                      /* SMIA: frame length 0x0340, coarse integration 0x0202, analog gain 0x0204, hold 0x0104 */
 	REGS_OV16,                      /* OmniVision, 16-bit addresses: exposure 0x3500.., gain 0x3508, VTS 0x380e, hold 0x3208 */
 };
-static const struct sensor_hw sensors[] = {
+static const struct sensor_hw redwood_sensors[] = {
 	{       /* cam-sensor2: OV02B10, CCI 1 master 0 (GPIO 73/74), reset GPIO 77, MCLK2 (GPIO 66), csiphy 2 */
 		.name = "macro (OV02B10)", .tab = "camera-ov02b10.tab", .bus_name = "CCI 1 master 0", .sda = 73, .scl = 74, .reset = 77,
 		.mclk_cmd = 0xe038, .mclk_cbcr = 0xe050, .mclk_pin = 66,
 		.vana = { SUPPLY_LDO, 7, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 6, 1800, 0, 0 }, .vio = { SUPPLY_NONE, 0, 0, 0, 0 },
 		.csiphy = 2, .phy_cbcr = 0xe110, .timer_cmd = 0xe0f4, .timer_cbcr = 0xe10c, .regs = REGS_OV_PAGED, .bayer = 0,
-		.pattern_bayer = 2, .chip = "OV02B10",
+		.pattern_bayer = 2, .chip = "OV02B10", .gain_unity = 16, .gain_max = 0xf8,
 	},
 	{       /* cam-sensor0: S5KHM2SD, CCI 0 master 1 (GPIO 71/72), reset GPIO 21, MCLK1 (GPIO 65), csiphy 1;
 		 * VANA: camera_wide_vana_ldo, a fixed 2.8 V regulator from BOB switched by GPIO 106 (ramp 135 us) */
@@ -221,25 +223,54 @@ static const struct sensor_hw sensors[] = {
 		.mclk_cmd = 0xe01c, .mclk_cbcr = 0xe034, .mclk_pin = 65,
 		.vana = { SUPPLY_GPIO, 0, 2800, 106, 135 }, .vdig = { SUPPLY_LDO, 1, 1000, 0, 0 }, .vio = { SUPPLY_LDO, 5, 1800, 0, 0 },
 		.csiphy = 1, .phy_cbcr = 0xe0ec, .timer_cmd = 0xe0d0, .timer_cbcr = 0xe0e8, .regs = REGS_SMIA, .bayer = 2,
-		.pattern_bayer = 2, .chip = "S5KHM2SD",
+		.pattern_bayer = 2, .chip = "S5KHM2SD", .gain_unity = 32, .gain_max = 0x800,
 	},
 	{       /* cam-sensor1: OV16A1Q, CCI 0 master 0 (GPIO 69/70), reset GPIO 20, MCLK0 (GPIO 64), csiphy 0 */
 		.name = "front (OV16A1Q)", .tab = "camera-ov16a1q.tab", .bus_name = "CCI 0 master 0", .sda = 69, .scl = 70, .reset = 20,
 		.mclk_cmd = 0xe000, .mclk_cbcr = 0xe018, .mclk_pin = 64,
 		.vana = { SUPPLY_LDO, 3, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 2, 1200, 0, 0 }, .vio = { SUPPLY_LDO, 5, 1800, 0, 0 },
 		.csiphy = 0, .phy_cbcr = 0xe0c8, .timer_cmd = 0xe0ac, .timer_cbcr = 0xe0c4, .regs = REGS_OV16, .bayer = 0,
-		.pattern_bayer = 0, .chip = "OV16A1Q",
+		.pattern_bayer = 0, .chip = "OV16A1Q", .gain_unity = 0x100, .gain_max = 0xf80,
 	},
 	{       /* cam-sensor3: S5K4H7, CCI 1 master 1 (GPIO 75/76), reset GPIO 78, MCLK3 (GPIO 67, 24 MHz: camcc's PLL2), csiphy 3;
 		 * VDIG: camera_ultra_dvdd_ldo, a fixed 1.2 V regulator from PM7325 S8 switched by GPIO 108 (ramp 135 us) */
 		.name = "ultra-wide (S5K4H7)", .tab = "camera-s5k4h7.tab", .bus_name = "CCI 1 master 1", .sda = 75, .scl = 76, .reset = 78,
 		.mclk_cmd = 0xe054, .mclk_cbcr = 0xe06c, .mclk_pin = 67,
 		.vana = { SUPPLY_LDO, 4, 2800, 0, 0 }, .vdig = { SUPPLY_GPIO, 0, 1200, 108, 135 }, .vio = { SUPPLY_LDO, 5, 1800, 0, 0 },
-		.csiphy = 3, .phy_cbcr = 0xe138, .timer_cmd = 0xe11c, .timer_cbcr = 0xe134, .regs = REGS_SMIA, .bayer = 0,
-		.pattern_bayer = 0, .chip = "S5K4H7",
+		.csiphy = 3, .phy_cbcr = 0xe138, .timer_cmd = 0xe11c, .timer_cbcr = 0xe134, .regs = REGS_SMIA, .bayer = 2,
+		.pattern_bayer = 2, .chip = "S5K4H7", .gain_unity = 32, .gain_max = 0x200,
 	},
 };
-static const struct sensor_hw *hw = &sensors[0];
+/* Renoir live DT + its vendor sensor modules. Capture parameters remain disabled
+ * until the shima CSIPHY1.2.4/CSID580/IFE580 backend is implemented. */
+static const struct sensor_hw renoir_sensors[] = {
+    { .name = "macro (S5K5E9YX04)", .tab = "camera-renoir-s5k5e9yx04.tab",
+      .bus_name = "CCI 1 master 0", .sda = 111, .scl = 112, .reset = 116,
+      .mclk_cmd = 0xe070, .mclk_cbcr = 0xe088, .mclk_pin = 104,
+      .vana = { SUPPLY_LDO, 4, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 2, 1200, 0, 0 },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 0, .regs = REGS_SMIA, .chip = "S5K5E9YX04" },
+    { .name = "wide (S5KGW3)", .tab = "camera-renoir-s5kgw3.tab",
+      .bus_name = "CCI 0 master 1", .sda = 109, .scl = 110, .reset = 117,
+      .mclk_cmd = 0xe01c, .mclk_cbcr = 0xe034, .mclk_pin = 101,
+      .vana = { SUPPLY_LDO, 6, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 1, 1056, 0, 0 },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .vaf = { SUPPLY_LDO, 3, 2800, 0, 0 },
+      .csiphy = 1, .regs = REGS_SMIA, .chip = "S5KGW3" },
+    { .name = "front (S5K3T2)", .tab = "camera-renoir-s5k3t2.tab",
+      .bus_name = "CCI 0 master 0", .sda = 107, .scl = 108, .reset = 126,
+      .mclk_cmd = 0xe000, .mclk_cbcr = 0xe018, .mclk_pin = 100,
+      .vana = { SUPPLY_GPIO, 0, 2800, 176, 135 }, .vdig = { SUPPLY_GPIO, 0, 1050, 177, 135 },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 5, .regs = REGS_SMIA, .chip = "S5K3T2" },
+    { .name = "ultra-wide (IMX355)", .tab = "camera-renoir-imx355.tab",
+      .bus_name = "CCI 1 master 1", .sda = 113, .scl = 114, .reset = 119,
+      .mclk_cmd = 0xe038, .mclk_cbcr = 0xe050, .mclk_pin = 102,
+      .vana = { SUPPLY_LDO, 7, 2704, 0, 0 }, .vdig = { SUPPLY_LDO, 2, 1200, 0, 0 },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 3, .regs = REGS_SMIA, .chip = "IMX355" },
+};
+#define SENSOR_COUNT 4u
+_Static_assert(sizeof(redwood_sensors) / sizeof(redwood_sensors[0]) == SENSOR_COUNT, "redwood sensor slots");
+_Static_assert(sizeof(renoir_sensors) / sizeof(renoir_sensors[0]) == SENSOR_COUNT, "renoir sensor slots");
+static const struct sensor_hw *sensors = redwood_sensors;
+static const struct sensor_hw *hw = &redwood_sensors[0];
 static unsigned hw_index;
 
 static void
@@ -252,7 +283,7 @@ show_pin(unsigned pin, const char *what)
 }
 
 /* The pins written while powered up, as they were found, to be put back: the reset pin, MCLK's, a supply's. */
-static uint32_t found_reset_cfg, found_reset_io, found_mclk_cfg, found_vana_cfg, found_vana_io;
+static uint32_t found_reset_cfg, found_reset_io, found_mclk_cfg;
 static bool pins_found;
 
 /* the sensor's reset and MCLK pins as they are now (to be put back when it is powered down) */
@@ -279,7 +310,7 @@ struct bus {
 	unsigned        sda, scl;
 	uint32_t        cfg[2], io[2];  /* the pins as they were found, while taken */
 };
-static struct bus pmic_bus = { .name = "the PM8008i's I2C", .sda = PIN_PMIC_SDA, .scl = PIN_PMIC_SCL };
+static struct bus pmic_bus = { .name = "the PM8008i's I2C", .sda = 4, .scl = 5 };
 static struct bus cci_bus;              /* the sensor's (from hw) */
 
 static void
@@ -420,7 +451,7 @@ i2c_transfer(struct bus *b, uint8_t address, const uint8_t *out, unsigned out_co
 	return answered;
 }
 
-/* ---- the PMIC arbiter (version 5), for the PM8350C's GPIO 3: as in redwood_torch.c ------------------ */
+/* ---- the PMIC arbiter (version 5), for the PM8350C's PM8008 reset GPIO: as in redwood_torch.c ------------------ */
 
 #define ARB_CORE_PHYS           0x0c440000UL
 #define ARB_CORE_SIZE           0x1100UL
@@ -449,7 +480,7 @@ i2c_transfer(struct bus *b, uint8_t address, const uint8_t *out, unsigned out_co
 #define TRANSFER_TIMEOUT_US     2000
 #define DROPPED                 "the transfer was dropped"
 
-#define PGPIO_ID                0x28a   /* the PM8350C (slave 2), GPIO 3's peripheral (0x8800 + 0x100 x 2) */
+#define PGPIO_ID                (camera_renoir ? 0x28e : 0x28a)   /* the PM8350C (slave 2), PM8008 reset GPIO's peripheral (0x8800 + 0x100 x 2) */
 #define PGPIO_TYPE              0x04    /* 0x10: a GPIO */
 #define PGPIO_SUBTYPE           0x05
 #define PGPIO_RT_STS            0x10    /* [0] what the pin is at */
@@ -512,7 +543,7 @@ pgpio_read(uint8_t reg, uint8_t *value)
 	return problem;
 }
 
-/* One of GPIO 3's five registers above written and read back (when `force', also after something went wrong). */
+/* One of PM8008 reset GPIO's five registers above written and read back (when `force', also after something went wrong). */
 static bool
 pgpio_put(uint8_t reg, uint8_t value, bool force)
 {
@@ -524,8 +555,9 @@ pgpio_put(uint8_t reg, uint8_t value, bool force)
 		give_up("a write to the PM8350C that may not be made");
 		return false;
 	}
-	if (((rd(arb_core + ARB_CHANNEL(pgpio_channel)) >> 8) & 0xfff) != PGPIO_ID) {
-		give_up("the arbiter's channel is no longer the PM8350C's GPIO 3");
+	if (((rd(arb_core + ARB_CHANNEL(pgpio_channel)) >> 8) & 0xfff) != PGPIO_ID ||
+        (rd(arb_cnfg + ARB_OWNER(pgpio_channel)) & 7) != ARB_SYSTEM) {
+		give_up("the arbiter's channel is no longer the PM8350C's PM8008 reset GPIO");
 		return false;
 	}
 	for (int tries = 0; tries < 3; tries++) {
@@ -539,7 +571,7 @@ pgpio_put(uint8_t reg, uint8_t value, bool force)
 		}
 	}
 	if (problem != NULL || (problem = pgpio_read(reg, &back)) != NULL || back != value) {
-		say("camera: PM8350C GPIO 3 %#04x <- %#04x: %s (reads %#04x)\n", reg, value, problem ? problem : "does not read back", back);
+		say("camera: PM8350C PM8008 reset GPIO %#04x <- %#04x: %s (reads %#04x)\n", reg, value, problem ? problem : "does not read back", back);
 		give_up("a write to the PM8350C that failed");
 		return false;
 	}
@@ -556,7 +588,7 @@ pgpio_find(void)
 			continue;
 		}
 		owner = rd(arb_cnfg + ARB_OWNER(n)) & 7;
-		say("camera: channel %u is the PM8350C's GPIO 3 (%#x); written by system %u%s\n", n, map, owner,
+		say("camera: channel %u is the PM8350C's PM8008 reset GPIO (%#x); written by system %u%s\n", n, map, owner,
 		    owner == ARB_SYSTEM ? ", which is us" : "");
 		if (!pgpio_found || owner == ARB_SYSTEM) {
 			pgpio_found = true;
@@ -569,14 +601,14 @@ pgpio_find(void)
 	}
 }
 
-/* GPIO 3 as Android's "pm8008i_active" has it: enabled, an output of the normal function, high, VIN0, no pull. */
+/* PM8008 reset GPIO as Android's "pm8008i_active" has it: enabled, an output of the normal function, high, VIN0, no pull. */
 static uint8_t pgpio_found_regs[5];             /* DIG_VIN_CTL, DIG_PULL_CTL, MODE_CTL, OUT_SOURCE_CTL, EN_CTL as found */
 static bool pgpio_changed;
 
 static bool
 pgpio_active(uint8_t *regs)
 {
-	return (regs[0] & 7) == 0 && (regs[1] & 7) == 5 && (regs[2] & 3) == 1 && regs[3] == 0x80 && (regs[4] & 0x80);
+	return (regs[0] & 7) == (camera_renoir ? 1 : 0) && (regs[1] & 7) == 5 && (regs[2] & 3) == 1 && regs[3] == 0x80 && (regs[4] & 0x80);
 }
 
 static const uint8_t pgpio_which[5] = { PGPIO_DIG_VIN_CTL, PGPIO_DIG_PULL_CTL, PGPIO_MODE_CTL, PGPIO_OUT_SOURCE_CTL, PGPIO_EN_CTL };
@@ -609,9 +641,9 @@ pgpio_read_all(uint8_t *regs)
 static bool
 sensor_ldo(unsigned n, unsigned mv)
 {
-	const struct supply *all[3] = { &hw->vana, &hw->vdig, &hw->vio };
+	const struct supply *all[4] = { &hw->vana, &hw->vdig, &hw->vio, &hw->vaf };
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 4; i++) {
 		if (all[i]->kind == SUPPLY_LDO && all[i]->ldo == n && (mv == 0 || all[i]->mv == mv)) {
 			return true;
 		}
@@ -744,7 +776,7 @@ ldo_off(unsigned n)
 
 #define GCC_PHYS                0x00100000UL
 #define GCC_CAMERA_AHB_CBCR     0x26004         /* always on (gcc-yupik.c keeps it so) */
-#define GCC_CAMERA_XO_CBCR      0x26028
+#define GCC_CAMERA_XO_CBCR      (camera_renoir ? 0x26020 : 0x26028)
 #define CAMCC_PHYS              0x0ad00000UL
 #define CAMCC_SIZE              0x20000UL
 #define MCLK_CMD_RCGR           (hw->mclk_cmd)          /* [0] update, [31] the root is off */
@@ -753,7 +785,7 @@ ldo_off(unsigned n)
 #define MCLK_N                  (hw->mclk_cmd + 12)
 #define MCLK_D                  (hw->mclk_cmd + 16)
 #define MCLK_CBCR               (hw->mclk_cbcr)         /* [0] enable, [31] the clock is off */
-#define TITAN_TOP_GDSCR         0xc194          /* [0] collapse, [11] keep the registers, [31] on */
+#define TITAN_TOP_GDSCR         (camera_renoir ? 0xc120 : 0xc194)          /* [0] collapse, [11] keep the registers, [31] on */
 #define CBCR_OFF                (1u << 31)
 #define CMD_UPDATE              1u
 #define GDSC_COLLAPSE           1u
@@ -1094,7 +1126,20 @@ sensor_address(void)
 	return (uint8_t)(ctab->slave >> 1);    /* (the module file's is the 8-bit one) */
 }
 
-static bool chip_enable_switched, powered, reset_driven, vana_gpio_switched;
+static bool chip_enable_switched, powered, reset_driven;
+/* Each GPIO supply needs its own saved state: Renoir front uses two at once. */
+static struct {
+    const struct supply *supply;
+    uint32_t cfg, io;
+    bool changed;
+} gpio_supplies[4];
+
+static bool
+gpio_supplies_changed(void)
+{
+    for (unsigned i = 0; i < 4; i++) if (gpio_supplies[i].changed) return true;
+    return false;
+}
 
 /* A GPIO-switched supply (the wide sensor's VANA, the ultra-wide's VDIG): the pin a high output (GPIO, no pull, 2 mA: cam_sensor_active_*). */
 static bool
@@ -1104,9 +1149,15 @@ supply_on(const struct supply *s)
 		return ldo_on(s->ldo, s->mv);
 	}
 	if (s->kind == SUPPLY_GPIO) {
-		found_vana_cfg = rd(GPIO_CFG(s->gpio));
-		found_vana_io = rd(GPIO_IO(s->gpio));
-		vana_gpio_switched = true;
+        unsigned slot;
+        for (slot = 0; slot < 4; slot++)
+            if (gpio_supplies[slot].supply == s && gpio_supplies[slot].changed) return true;
+        for (slot = 0; slot < 4 && gpio_supplies[slot].changed; slot++) {}
+        if (slot == 4) { give_up("too many GPIO supplies"); return false; }
+        gpio_supplies[slot].supply = s;
+        gpio_supplies[slot].cfg = rd(GPIO_CFG(s->gpio));
+        gpio_supplies[slot].io = rd(GPIO_IO(s->gpio));
+        gpio_supplies[slot].changed = true;
 		wr(GPIO_IO(s->gpio), 2);
 		wr(GPIO_CFG(s->gpio), CFG_OUTPUT | CFG_DRIVE_MA(2));
 		if ((rd(GPIO_CFG(s->gpio)) & 0x3ff) != (CFG_OUTPUT | CFG_DRIVE_MA(2)) || !(rd(GPIO_IO(s->gpio)) & 2)) {
@@ -1126,13 +1177,15 @@ supply_off(const struct supply *s)
 {
 	if (s->kind == SUPPLY_LDO) {
 		ldo_off(s->ldo);
-	} else if (s->kind == SUPPLY_GPIO && vana_gpio_switched) {
-		wr(GPIO_IO(s->gpio), 0);
-		spin_us(10);
-		wr(GPIO_IO(s->gpio), found_vana_io & 2);
-		wr(GPIO_CFG(s->gpio), found_vana_cfg);
-		vana_gpio_switched = false;
-		say("camera: gpio%u back as it was found: the fixed regulator off\n", s->gpio);
+    } else if (s->kind == SUPPLY_GPIO) {
+        for (unsigned i = 0; i < 4; i++) {
+            if (!gpio_supplies[i].changed || gpio_supplies[i].supply != s) continue;
+            /* Restore the saved level directly: a rail that was on stays on. */
+            wr(GPIO_IO(s->gpio), gpio_supplies[i].io & 2);
+            wr(GPIO_CFG(s->gpio), gpio_supplies[i].cfg);
+            gpio_supplies[i].changed = false;
+            say("camera: gpio%u supply restored\n", s->gpio);
+        }
 	}
 }
 
@@ -1150,7 +1203,7 @@ sensor_delay(uint32_t us)
 static bool
 power_step(const struct ctab_entry *e, bool up)
 {
-	const struct supply *s = e->address == 1 ? &hw->vana : e->address == 2 ? &hw->vdig : e->address == 3 ? &hw->vio : NULL;
+	const struct supply *s = e->address == 1 ? &hw->vana : e->address == 2 ? &hw->vdig : e->address == 3 ? &hw->vio : e->address == 4 ? &hw->vaf : NULL;
 
 	switch (e->address) {
 	case 8:
@@ -1170,7 +1223,7 @@ power_step(const struct ctab_entry *e, bool up)
 			mclk_off();
 		}
 		break;
-	case 1: case 2: case 3:
+	case 1: case 2: case 3: case 4:
 		if (s->kind == SUPPLY_NONE) {
 			give_up("a supply the device tree does not give this sensor");
 			return false;
@@ -1197,7 +1250,7 @@ static void
 power_down(void)
 {
 	bool was = powered || mclk_switched || gdsc_switched || reset_driven || chip_enable_switched || pgpio_changed ||
-	    vana_gpio_switched;
+	    gpio_supplies_changed();
 	uint32_t count = 0;
 	const struct ctab_entry *e = ctab != NULL ? ctab_block(ctab_power, 2, "pwrdn", &count) : NULL;
 
@@ -1219,6 +1272,7 @@ power_down(void)
 	supply_off(&hw->vio);
 	supply_off(&hw->vana);
 	supply_off(&hw->vdig);
+	supply_off(&hw->vaf);
 	gdsc_off();
 	if (chip_enable_switched) {
 		uint8_t enable = 0;
@@ -1240,7 +1294,7 @@ power_down(void)
 				all &= pgpio_put(pgpio_which[i], pgpio_found_regs[i], true);
 			}
 		}
-		say("camera: the PM8350C's GPIO 3 %s\n", all ? "back as it was found" : "COULD NOT BE PUT BACK");
+		say("camera: the PM8350C's PM8008 reset GPIO %s\n", all ? "back as it was found" : "COULD NOT BE PUT BACK");
 		pgpio_changed = false;
 	}
 	if (reset_driven && pins_found) {
@@ -1259,15 +1313,15 @@ pm8008_up(void)
 	uint8_t regs[5], revid[4] = { 0 }, enable = 0;
 
 	if (!pgpio_read_all(regs)) {
-		give_up("the PM8350C's GPIO 3 cannot be read");
+		give_up("the PM8350C's PM8008 reset GPIO cannot be read");
 		return false;
 	}
 	memcpy(pgpio_found_regs, regs, sizeof(regs));
 	if (!pgpio_active(regs)) {
-		uint8_t want[5] = { (uint8_t)(regs[0] & ~7), (uint8_t)((regs[1] & ~7) | 5), (uint8_t)((regs[2] & ~3) | 1), 0x80,
+		uint8_t want[5] = { (uint8_t)((regs[0] & ~7) | (camera_renoir ? 1 : 0)), (uint8_t)((regs[1] & ~7) | 5), (uint8_t)((regs[2] & ~3) | 1), 0x80,
 			            (uint8_t)(regs[4] | 0x80) };
 
-		say("camera: the PM8008i is held in reset (GPIO 3 vin, pull, mode, source, enable: %02x %02x %02x %02x %02x): let out as "
+		say("camera: the PM8008i is held in reset (PM8008 reset GPIO vin, pull, mode, source, enable: %02x %02x %02x %02x %02x): let out as "
 		    "Android lets it out\n", regs[0], regs[1], regs[2], regs[3], regs[4]);
 		pgpio_changed = true;
 		for (int i = 0; i < 5; i++) {
@@ -2950,8 +3004,8 @@ capture_sensor(void)
 #define IDLE_MS                 1000
 #define FRAME_TIMEOUT_MS        1500
 #define EXPOSURE_MARGIN         40
-#define GAIN_UNITY              32              /* the S5KHM2SD's 0x0204: 32 is 1x (cam=4) */
-#define GAIN_MAX                0x800
+#define GAIN_UNITY              (hw->gain_unity)
+#define GAIN_MAX                (hw->gain_max)
 #define FRAME_LINES_MAX         0xfff0
 #define RDI0_SOF                (1u << 27)      /* IFE_IRQ_STATUS0 (cam_vfe_lite16x.h: sof_irq_mask of RDI 0) */
 #define WM0_DONE                1u              /* BUS_IRQ_STATUS1 */
@@ -3012,11 +3066,42 @@ exposure_limits(uint32_t *lines, uint32_t *gain, uint32_t *frame_lines)
 	}
 }
 
+/*
+ * The exposure, gain and frame length, written the sensor's way in its group hold (its module file's
+ * "holdon" and "holdoff" tables; the OV02B10's page 1 and its 0xfe = 2):
+ *   SMIA      0x0340 frame length, 0x0202 coarse integration (lines), 0x0204 analog gain (32 is 1x)
+ *   OV16A1Q   0x380e/0x380f frame length (VTS), 0x3500..0x3502 exposure (lines, 20 bits), 0x3508/0x3509
+ *             gain (0x100 is 1x) -- the registers its tables set the first exposure in
+ *   OV02B10   0x14/0x15 the frame's extra lines, 0x0e/0x0f exposure (lines), 0x22 gain (16 is 1x)
+ */
 static bool
 exposure_write(uint32_t lines, uint32_t gain, uint32_t frame_lines)
 {
-	if (!sensor_table("holdon") || !sensor_write(0x0340, (uint16_t)frame_lines, true) || !sensor_write(0x0202, (uint16_t)lines, true) ||
-	    !sensor_write(0x0204, (uint16_t)gain, true) || !sensor_table("holdoff")) {
+	bool ok;
+
+	switch (hw->regs) {
+	case REGS_SMIA:
+		ok = sensor_table("holdon") && sensor_write(0x0340, (uint16_t)frame_lines, true) && sensor_write(0x0202, (uint16_t)lines, true) &&
+		    sensor_write(0x0204, (uint16_t)gain, true) && sensor_table("holdoff");
+		break;
+	case REGS_OV16:
+		ok = sensor_table("holdon") && sensor_write(0x380e, (uint16_t)(frame_lines >> 8), false) &&
+		    sensor_write(0x380f, (uint16_t)(frame_lines & 0xff), false) && sensor_write(0x3500, (uint16_t)(lines >> 16 & 0xf), false) &&
+		    sensor_write(0x3501, (uint16_t)(lines >> 8 & 0xff), false) && sensor_write(0x3502, (uint16_t)(lines & 0xff), false) &&
+		    sensor_write(0x3508, (uint16_t)(gain >> 8 & 0x1f), false) && sensor_write(0x3509, (uint16_t)(gain & 0xff), false) &&
+		    sensor_table("holdoff");
+		break;
+	default: {
+		uint32_t extra = frame_lines - ios_mode->frame_length;
+
+		ok = sensor_write(0xfd, 0x01, false) && sensor_write(0x14, (uint16_t)(extra >> 8), false) &&
+		    sensor_write(0x15, (uint16_t)(extra & 0xff), false) && sensor_write(0x0e, (uint16_t)(lines >> 8), false) &&
+		    sensor_write(0x0f, (uint16_t)(lines & 0xff), false) && sensor_write(0x22, (uint16_t)gain, false) &&
+		    sensor_write(0xfe, 0x02, false) && sensor_write(0xfd, 0x00, false);
+		break;
+	}
+	}
+	if (!ok) {
 		give_up("a sensor write nobody acknowledged");
 		return false;
 	}
@@ -3137,7 +3222,7 @@ ios_start(void)
 	ios_ask.pending = false;
 	lck_mtx_unlock(&ios_lock);
 	exposure_limits(&lines, &gain, &frame_lines);
-	if (!sensor_table("on") || (hw->regs == REGS_SMIA && !exposure_write(lines, gain, frame_lines))) {
+	if (!sensor_table("on") || !exposure_write(lines, gain, frame_lines)) {
 		return false;
 	}
 	ios_now.lines = ios_next.lines = lines;
@@ -3241,7 +3326,7 @@ ios_session(void)
 		if (bus & WM0_DONE) {
 			wakeup(&ios_frames_done);
 		}
-		if (ask && ios_source != SOURCE_CSID_TPG && hw->regs == REGS_SMIA) {
+		if (ask && ios_source != SOURCE_CSID_TPG) {
 			exposure_limits(&lines, &gain, &frame_lines);
 			if (lines != ios_now.lines || gain != ios_now.gain || frame_lines != ios_now.frame_lines) {
 				if (!exposure_write(lines, gain, frame_lines)) {
@@ -3461,7 +3546,7 @@ camdev_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		return keep_picture(&c, uio);
 	}
 	if (c.command == REDWOOD_CAMERA_SENSOR) {
-		if (c.a >= sizeof(sensors) / sizeof(sensors[0])) {
+		if (c.a >= SENSOR_COUNT) {
 			return EINVAL;
 		}
 		lck_mtx_lock(&ios_lock);
@@ -3599,9 +3684,9 @@ serve_ios(void)
 static void
 show_ldos(void)
 {
-	const struct supply *all[3] = { &hw->vana, &hw->vdig, &hw->vio };
+	const struct supply *all[4] = { &hw->vana, &hw->vdig, &hw->vio, &hw->vaf };
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 4; i++) {
 		if (all[i]->kind == SUPPLY_LDO) {
 			show_ldo(all[i]->ldo);
 		}
@@ -3625,10 +3710,10 @@ look(void)
 	}
 	if (!pgpio_found || pgpio_read(PGPIO_TYPE, &type) != NULL || pgpio_read(PGPIO_SUBTYPE, &subtype) != NULL ||
 	    pgpio_read(PGPIO_RT_STS, &sts) != NULL || !pgpio_read_all(regs)) {
-		say("camera: the PM8350C's GPIO 3 cannot be read\n");
+		say("camera: the PM8350C's PM8008 reset GPIO cannot be read\n");
 		return;
 	}
-	say("camera: the PM8350C's GPIO 3 (the PM8008i's reset): type %#04x subtype %#04x, at %u; vin %#04x pull %#04x mode %#04x "
+	say("camera: the PM8350C's PM8008 reset GPIO (the PM8008i's reset): type %#04x subtype %#04x, at %u; vin %#04x pull %#04x mode %#04x "
 	    "source %#04x enable %#04x: %s\n", type, subtype, sts & 1, regs[0], regs[1], regs[2], regs[3], regs[4],
 	    pgpio_active(regs) ? "as Android's pm8008i_active (out of reset)" : "not as Android's pm8008i_active");
 	if (!pm8008_get(PM8008_CHIP, REVID_BASE, revid, 4)) {
@@ -3659,7 +3744,7 @@ camera_thread(__unused void *parameter, __unused wait_result_t result)
 	arb_observer = ml_io_map(ARB_OBSERVER_PHYS, ARB_OBSERVER_SIZE);
 	select_sensor(level == 5 ? 1 : 0);
 	if (PE_parse_boot_arg_str("cam_sensor", which, sizeof(which))) {
-		for (unsigned i = 0; i < sizeof(sensors) / sizeof(sensors[0]); i++) {
+		for (unsigned i = 0; i < SENSOR_COUNT; i++) {
 			if (strncmp(which, sensors[i].name, strlen(which)) == 0 && (sensors[i].name[strlen(which)] == ' ' ||
 			    sensors[i].name[strlen(which)] == '-')) {
 				select_sensor(i);
@@ -3673,7 +3758,7 @@ camera_thread(__unused void *parameter, __unused wait_result_t result)
 	pgpio_find();
 	find_pins();
 	look();
-	look_around();
+	if (!camera_renoir) look_around();
 	if (level == 3) {
 		capture_tpg();
 		power_down();
@@ -3701,13 +3786,23 @@ redwood_camera_init(void)
 {
 	thread_t thread;
 
-	/* Sensor rails, GPIOs and SMMU configuration below belong to Redwood. */
-	if (!redwood_board_is("redwood")) return;
+	camera_renoir = redwood_board_is("renoir");
+    if (!camera_renoir && !redwood_board_is("redwood")) return;
 
 	if (!PE_parse_boot_argn("cam", &level, sizeof(level)) || level == 0) {
 		return;
 	}
-	level = level > 5 ? 5 : level;
+    if (camera_renoir) {
+        if (level > 2) {
+            say("camera: Renoir capture backend not ready (CSID580/IFE580); no registers touched\n");
+            level = 0;
+            return;
+        }
+        sensors = renoir_sensors;
+        pmic_bus.sda = PIN_PMIC_SDA;
+        pmic_bus.scl = PIN_PMIC_SCL;
+    }
+    level = level > 5 ? 5 : level;
 	if (level >= 3) {
 		/*
 		 * Memory in one piece for the host (cam_keep_mb, default 24: a 12-megapixel NV12 picture of cam=5,

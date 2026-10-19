@@ -239,7 +239,8 @@ struct prop {
 static const struct prop stream_props[] = {
 	{ "PortType", "String", "ReadOnly" }, { "UniqueID", "String", "ReadOnly" }, { "NonLocalizedName", "String", "ReadOnly" },
 	{ "SupportedFormatsArray", "Collection", "ReadOnly" }, { "FocalLength", "Number", "ReadOnly" },
-	{ "LensFNumber", "Number", "ReadOnly" }, { "MaxZoomFactor", "Number", "ReadOnly" }, { "SupportedColorSpaces", "Collection", "ReadOnly" },
+	{ "LensFNumber", "Number", "ReadOnly" }, { "PixelSize", "Number", "ReadOnly" },
+	{ "MaxZoomFactor", "Number", "ReadOnly" }, { "SupportedColorSpaces", "Collection", "ReadOnly" },
 	{ "HasAutoFocusPositionSensor", "Boolean", "ReadOnly" }, { "Clock", "Clock", "ReadOnly" },
 	{ "FormatIndex", "Number", "ReadWrite" }, { "MinimumFrameRate", "Number", "ReadWrite" }, { "MaximumFrameRate", "Number", "ReadWrite" },
 	{ "MaximumAllowedFrameRate", "Number", "ReadWrite" }, { "VideoOutputConfigurations", "Collection", "ReadWrite" },
@@ -327,6 +328,21 @@ format(int sensor_width, int sensor_height, int max_fps, bool binned)
 	put(f, "SensorHeight", number_i(sensor_height));
 	put(f, "ISOBase", number_f(32));
 	put(f, "DefaultAEMaxGain", number_f(64));
+
+	/*
+	 * The sensor crop geometry the capture-graph builder reads off this format to resolve non-zero
+	 * output dimensions (confirmed by a hook: -[FigCaptureSourceVideoFormat sensorCropDimensions] /
+	 * postGDCCropDimensions] return these). Everything spans the full sensor: no GDC crop.
+	 */
+	put(f, "SensorCropWidth", number_i(sensor_width));
+	put(f, "SensorCropHeight", number_i(sensor_height));
+	put(f, "PreGDCSensorCropWidth", number_i(sensor_width));
+	put(f, "PreGDCSensorCropHeight", number_i(sensor_height));
+	put(f, "PostGDCCropWidth", number_i(sensor_width));
+	put(f, "PostGDCCropHeight", number_i(sensor_height));
+	put(f, "GeometricDistortionCorrectedNativeWidth", number_i(sensor_width));
+	put(f, "GeometricDistortionCorrectedNativeHeight", number_i(sensor_height));
+
 	put(outputs, "PrimaryScaler", output_info(sensor_width, sensor_height));
 	put(outputs, "SecondaryScaler", output_info(sensor_width, sensor_height));
 	put(outputs, "StillImage", output_info(sensor_width, sensor_height));
@@ -408,12 +424,46 @@ stream_copy_property(CMBaseObjectRef o, CFStringRef key, CFAllocatorRef allocato
 		value = CFRetain(CMClockGetHostTimeClock());
 	} else if (key_is(key, "TorchLevel") || key_is(key, "ExposureBias")) {
 		value = number_f(0);
+	} else if (key_is(key, "VideoOutputConfigurations") || key_is(key, "VideoOutputsEnabled")) {
+		/*
+		 * ReadWrite, but the capture-graph builder READS these back while it builds the graph
+		 * (BWMultiStreamCameraSourceNode's _updateOutputsStorage does a getProperty: for
+		 * VideoOutputConfigurations, not IfSupported:), and a failed read tears the graph down. Return
+		 * what each output holds now.
+		 */
+		bool configs = key_is(key, "VideoOutputConfigurations");
+		CFMutableDictionaryRef d = (CFMutableDictionaryRef)new_dict();
+
+		pthread_mutex_lock(&s->lock);
+		for (int i = 0; i < OUTPUTS; i++) {
+			CFStringRef name = CFStringCreateWithCString(NULL, output_names[i], kCFStringEncodingUTF8);
+
+			if (configs) {
+				if (s->out[i].config != NULL) {
+					CFDictionarySetValue(d, name, s->out[i].config);
+				}
+			} else {
+				CFDictionarySetValue(d, name, s->out[i].enabled ? kCFBooleanTrue : kCFBooleanFalse);
+			}
+			CFRelease(name);
+		}
+		pthread_mutex_unlock(&s->lock);
+		value = d;
 	} else if (key_is(key, "SupportedPropertiesDictionary")) {
 		value = CFRetain(s->supported);
 	} else if (key_is(key, "FocalLength")) {
 		value = number_f(4.0);          /* (the iPhone X's wide camera's, in millimetres) */
 	} else if (key_is(key, "LensFNumber")) {
 		value = number_f(1.8);
+	} else if (key_is(key, "PixelSize")) {
+		/*
+		 * The capture-graph builder REQUIRES this of the stream: -[BWFigVideoCaptureStream
+		 * initWithCaptureStream:...] does a getProperty: (not IfSupported:) for it, and without it the
+		 * init fails, so FigVideoCaptureSourcesActivateAndCreateDevices errors and the graph is never
+		 * built. The sensor's pixel pitch in micrometres (the iPhone X wide camera's); any value in
+		 * (0, 100) is accepted.
+		 */
+		value = number_f(1.22);
 	} else if (key_is(key, "MaxZoomFactor")) {
 		value = number_f(16);
 	} else if (key_is(key, "ZoomFactor")) {
@@ -894,6 +944,24 @@ device_request_streams(CMBaseObjectRef o, CFArrayRef streams, CFDictionaryRef op
 		say("device: streams asked for (%ld)%s", streams ? (long)CFArrayGetCount(streams) : 0L, options ? ", with options" : "");
 		if (options != NULL) {
 			say_once("device: the request's options", CFSTR("RequestStreams"), options);
+		}
+	}
+	/*
+	 * Requesting a stream is this device's cue to begin producing: mediaserverd's capture graph
+	 * configures the stream (it installs the PrimaryScaler PixelBufferHandler) and then reserves the
+	 * streams through here, but it never calls the FigCaptureStream start method, so start the stream's
+	 * frame worker from the reservation. stream_start is idempotent (it no-ops when already running),
+	 * and relinquish does not stop the worker, so the reservation thrash does not tear it down.
+	 */
+	if (streams != NULL) {
+		CFIndex n = CFArrayGetCount(streams);
+
+		for (CFIndex i = 0; i < n; i++) {
+			CMBaseObjectRef st = (CMBaseObjectRef)CFArrayGetValueAtIndex(streams, i);
+
+			if (st != NULL) {
+				(void)stream_start(st);
+			}
 		}
 	}
 	return 0;

@@ -1,0 +1,30 @@
+[
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_ofilm_imx355_ultra.bin",
+    "git_blob": "358217d984b56c1b5fdc0d010760c35d585a4f53",
+    "sha256": "86d39ec28b294a88abbe230b23f1bea5970745845360b454b9deb894c994a76e",
+    "bytes": 56939,
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_ofilm_imx355_ultra.bin"
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_ofilm_s5kgw3_wide.bin",
+    "git_blob": "81de880df40e71e973921b9a6f6cc75e0a5fe54b",
+    "sha256": "235acd05a4fdddfe35ec2bb45768d48119124a89a0b5a0a48733cca1d9a5f16c",
+    "bytes": 861159,
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_ofilm_s5kgw3_wide.bin"
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_sunny_s5k3t2_front.bin",
+    "git_blob": "5800852478a782f8f58a8143abf9c2d2080af724",
+    "sha256": "e0cd635495201f9a8f53da2b4d374cdc7e52d0a68d298aa3eb5fc04c2b850633",
+    "bytes": 129455,
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_sunny_s5k3t2_front.bin"
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_sunny_s5k5e9yx04_macro.bin",
+    "git_blob": "3b24b358275aef1322ca949b1f22fe92872c5159",
+    "sha256": "bdfee291f9f83edf26fdf472362f5da4f3cd21b1fa30eb6b5aa7a9973b7a40ae",
+    "bytes": 34340,
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.sensormodule.renoir_sunny_s5k5e9yx04_macro.bin"
+  }
+]

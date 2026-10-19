@@ -1,0 +1,4 @@
+# Normal Renoir boot: no automatic tone, keyboard-click or melody tests.
+/bin/ps -A
+/redwood/bin/net_test waitaddr en0 150 fetch https://example.com/ resolve example.com
+/redwood/bin/battery_test 1
