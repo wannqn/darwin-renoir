@@ -15,7 +15,7 @@
 
 extern const void *_dyld_get_shared_cache_range(size_t *);
 static double (*original_offset)(id, SEL);
-#define RENOIR_CLOCK_SHIFT_POINTS 12.0
+#define RENOIR_CLOCK_SHIFT_POINTS 24.0
 
 static double
 leading_offset(id self, SEL cmd)

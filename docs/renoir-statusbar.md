@@ -1,6 +1,6 @@
 # Renoir status bar clock offset
 
-The initial correction is **+12 logical points to the right** (about 35 physical
+The current correction is **+24 logical points to the right** (about 69 physical
 panel pixels with this port's current display scaling). Change
 `RENOIR_CLOCK_SHIFT_POINTS` in `userland/src/statusbar.c` to tune it.
 This moves the small status bar clock, not the large Lock Screen clock.
@@ -11,7 +11,7 @@ The iPhone X / iOS 16.5 (20F66) UIKit cache uses
 `+[_UIStatusBarVisualProvider_Split1125 leadingCenteringOffset]` in
 `-[_UIStatusBarVisualProvider_FixedSplit leadingCenteringEdgeInset]`.
 The native `pillCenteringEdgeInset` derives from that same leading inset.
-The hook returns Apple's original metric plus 12 on every call, so both ordinary
+The hook returns Apple's original metric plus 24 on every call, so both ordinary
 clock and activity pill use UIKit's own layout, animations and replacement views.
 It never modifies a view frame, transform, text width, hidden flag or alpha.
 Repeated layout does not add to an already shifted position.
@@ -63,7 +63,7 @@ Never put diagnostic jobs or the test macro in the normal image.
 The long QEMU run was allowed at least five minutes to start the UI (short
 runs showed only the boot logo/black transition and were not visual failures).
 Home screen and Settings both show the shifted clock. Preferences logs confirm
-that the application constructor installed the same +12-point metric. Turning
+that the application constructor installed the same offset metric. Turning
 the screen off, on and unlocking back to Settings preserves the clock position.
 Evidence: `logs/qemu-renoir-clock-long.log`, `logs/clock-long-5min.png`,
 `logs/clock-current.png`, `logs/clock-after-power-cycle.png`.
@@ -74,3 +74,9 @@ shows the shifted clock again after allowing five minutes for UI startup. See
 Physical phone checks still need hole-punch clearance, Safari, orientation
 changes, 12/24-hour time and an activity pill. Normal iOS hiding of the status bar in a
 fullscreen application remains native behavior.
+
+## Phone adjustment
+
+The first +12-point build was booted on Renoir through fastboot boot. The user
+reported insufficient hole-punch clearance and requested +24 points. The constant
+is now 24; the +12 QEMU results above describe the first tested version.

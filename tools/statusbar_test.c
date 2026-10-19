@@ -1,4 +1,4 @@
-/* Diagnostic only. Link UIKit, then run: statusbar_test 12 (forced QEMU
+/* Diagnostic only. Link UIKit, then run: statusbar_test 24 (forced QEMU
  * build), or statusbar_test 0 (normal library on QEMU/non-Renoir). */
 #include <objc/runtime.h>
 #include <dlfcn.h>
