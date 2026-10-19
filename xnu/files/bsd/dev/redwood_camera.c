@@ -84,6 +84,7 @@
 #include <sys/redwood_audio.h>
 #include <sys/redwood_camera.h>
 #include <sys/redwood_input.h>
+#include "renoir_camera_core.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
@@ -241,30 +242,30 @@ static const struct sensor_hw redwood_sensors[] = {
 		.pattern_bayer = 2, .chip = "S5K4H7", .gain_unity = 32, .gain_max = 0x200,
 	},
 };
-/* Renoir live DT + its vendor sensor modules. Capture parameters remain disabled
- * until the shima CSIPHY1.2.4/CSID580/IFE580 backend is implemented. */
+/* Renoir live DT + its vendor sensor modules. cam=3/4 use the shima
+ * CSIPHY1.2.4/CSID580/IFE580 backend; cam=5 awaits streaming/gain validation. */
 static const struct sensor_hw renoir_sensors[] = {
     { .name = "macro (S5K5E9YX04)", .tab = "camera-renoir-s5k5e9yx04.tab",
       .bus_name = "CCI 1 master 0", .sda = 111, .scl = 112, .reset = 116,
       .mclk_cmd = 0xe070, .mclk_cbcr = 0xe088, .mclk_pin = 104,
       .vana = { SUPPLY_LDO, 4, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 2, 1200, 0, 0 },
-      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 0, .regs = REGS_SMIA, .chip = "S5K5E9YX04" },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 0, .timer_cmd = 0xe0a8, .timer_cbcr = 0xe0c0, .phy_cbcr = 0xe0c4, .regs = REGS_SMIA, .chip = "S5K5E9YX04" },
     { .name = "wide (S5KGW3)", .tab = "camera-renoir-s5kgw3.tab",
       .bus_name = "CCI 0 master 1", .sda = 109, .scl = 110, .reset = 117,
       .mclk_cmd = 0xe01c, .mclk_cbcr = 0xe034, .mclk_pin = 101,
       .vana = { SUPPLY_LDO, 6, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 1, 1056, 0, 0 },
       .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .vaf = { SUPPLY_LDO, 3, 2800, 0, 0 },
-      .csiphy = 1, .regs = REGS_SMIA, .chip = "S5KGW3" },
+      .csiphy = 1, .timer_cmd = 0xe0c8, .timer_cbcr = 0xe0e0, .phy_cbcr = 0xe0e4, .regs = REGS_SMIA, .chip = "S5KGW3" },
     { .name = "front (S5K3T2)", .tab = "camera-renoir-s5k3t2.tab",
       .bus_name = "CCI 0 master 0", .sda = 107, .scl = 108, .reset = 126,
       .mclk_cmd = 0xe000, .mclk_cbcr = 0xe018, .mclk_pin = 100,
       .vana = { SUPPLY_GPIO, 0, 2800, 176, 135 }, .vdig = { SUPPLY_GPIO, 0, 1050, 177, 135 },
-      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 5, .regs = REGS_SMIA, .chip = "S5K3T2" },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 5, .timer_cmd = 0xe14c, .timer_cbcr = 0xe164, .phy_cbcr = 0xe168, .regs = REGS_SMIA, .chip = "S5K3T2" },
     { .name = "ultra-wide (IMX355)", .tab = "camera-renoir-imx355.tab",
       .bus_name = "CCI 1 master 1", .sda = 113, .scl = 114, .reset = 119,
       .mclk_cmd = 0xe038, .mclk_cbcr = 0xe050, .mclk_pin = 102,
       .vana = { SUPPLY_LDO, 7, 2704, 0, 0 }, .vdig = { SUPPLY_LDO, 2, 1200, 0, 0 },
-      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 3, .regs = REGS_SMIA, .chip = "IMX355" },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 3, .timer_cmd = 0xe10c, .timer_cbcr = 0xe124, .phy_cbcr = 0xe128, .regs = REGS_SMIA, .chip = "IMX355" },
 };
 #define SENSOR_COUNT 4u
 _Static_assert(sizeof(redwood_sensors) / sizeof(redwood_sensors[0]) == SENSOR_COUNT, "redwood sensor slots");
@@ -1573,8 +1574,8 @@ show_smps(const char *what, uint16_t id)
 #define SMMU_IDR1               0x024
 #define SMMU_SMR(n)             (0x800 + 4 * (n))       /* bit 31 valid, [30:16] mask, [14:0] stream */
 #define SMMU_S2CR(n)            (0xc00 + 4 * (n))       /* [17:16] 0 translate 1 bypass 2 fault, [7:0] context */
-#define IFE_STREAM              0x800                   /* dt: msm_cam_smmu_ife, iommus 0x800.. 0xce0, mask 0x4e0 */
-#define IFE_STREAM_MASK         0x4e0
+#define IFE_STREAM              (camera_renoir ? 0x1000 : 0x800)                   /* dt: msm_cam_smmu_ife, iommus 0x800.. 0xce0, mask 0x4e0 */
+#define IFE_STREAM_MASK         (camera_renoir ? 0x440 : 0x4e0)
 
 static vm_offset_t smmu;
 
@@ -1695,10 +1696,79 @@ rail_position(const char *name, uint32_t level, uint32_t *address)
 	return -1;
 }
 
+static uint32_t
+rcam_arc_get(void *ctx, uint32_t reg)
+{
+    /* IRQ enable/status/clear belong to the whole RSC at TCS_BASE,
+     * not to the per-TCS stride. Expose this slot's bit as bit0. */
+    if (reg==0 || reg==4) return (rd(rsc+RSC_TCS_BASE+reg)>>CAMERA_TCS)&1;
+    return rd((vm_offset_t)ctx+reg);
+}
+static bool
+rcam_arc_put(void *ctx, uint32_t reg, uint32_t value, bool check)
+{
+    (void)check;
+    if(reg==0)wr(rsc+RSC_TCS_BASE,(rd(rsc+RSC_TCS_BASE)&~(1u<<CAMERA_TCS))|((value&1)<<CAMERA_TCS));
+    else if(reg==8)wr(rsc+RSC_IRQ_CLEAR,(value&1)<<CAMERA_TCS);
+    else wr((vm_offset_t)ctx+reg,value);
+    __asm__ volatile("dsb sy" ::: "memory"); return true;
+}
+static bool
+rcam_arc_wait(void *ctx, uint32_t reg, uint32_t mask, uint32_t want, uint32_t us)
+{
+    for(uint32_t waited=0;waited<us;waited+=50) {
+        if((rcam_arc_get(ctx,reg)&mask)==want)return true;
+        spin_us(50);
+    }
+    return false;
+}
+static bool renoir_arc_changed[2];
+static uint32_t renoir_arc_old[2], renoir_arc_vote[2];
+static bool
+renoir_camera_rails(bool on)
+{
+    uint32_t address[2];
+    if (on && (renoir_arc_changed[0] || renoir_arc_changed[1])) return false;
+    int position[2]={rail_position("cx.lvl",CX_LEVEL,&address[0]),
+        rail_position("mx.lvl",MX_LEVEL,&address[1])};
+    if(position[0]<0 || position[1]<0) return false;
+    /* ARC resources are command-db slave3; no VRM voltage registers here. */
+    if(((address[0]>>16)&15)!=3 || ((address[1]>>16)&15)!=3)return false;
+    struct rcam_io io={ .context=(void *)(rsc+RSC_TCS(CAMERA_TCS)),
+        .put=rcam_arc_put,.wait=rcam_arc_wait,.get=rcam_arc_get };
+    bool ok=true;
+    if(!leaving)redwood_rpmh_lock();
+    for(unsigned i=0;i<2;i++) {
+        uint32_t value=0;
+        if(!on && !renoir_arc_changed[i])continue;
+        if(!rcam_tcs_transfer(&io,address[i],false,&value)){ok=false;if(on)break;else continue;}
+        value&=0xffff;
+        if(on) {
+            if(value>15){ok=false;break;}
+            renoir_arc_old[i]=value;
+            renoir_arc_vote[i]=value>(uint32_t)position[i]?value:(uint32_t)position[i];
+            renoir_arc_changed[i]=true; /* a timed-out request may have reached AOP */
+            value=renoir_arc_vote[i];
+        } else {
+            /* Preserve a later client's vote rather than lowering it blindly. */
+            if(value!=renoir_arc_vote[i]){renoir_arc_changed[i]=false;continue;}
+            value=renoir_arc_old[i];
+        }
+        if(!rcam_tcs_transfer(&io,address[i],true,&value)){ok=false;if(on)break;else continue;}
+        if(!on)renoir_arc_changed[i]=false;
+    }
+    if(!leaving)redwood_rpmh_unlock();
+    rails_voted=renoir_arc_changed[0]||renoir_arc_changed[1];
+    say("camera: Renoir ARC votes %s: %s\n",on?"on":"restored",ok?"acknowledged":"failed");
+    return ok;
+}
+
 /* CX and MX at the camera's levels, or given back (`on' false). True: RPMh has said done. */
 static bool
 rails(bool on)
 {
+    if(camera_renoir)return renoir_camera_rails(on);
+
 	uint32_t addresses[2], values[2], done = 0;
 	int cx = rail_position("cx.lvl", CX_LEVEL, &addresses[0]), mx = rail_position("mx.lvl", MX_LEVEL, &addresses[1]);
 	vm_offset_t tcs = rsc + RSC_TCS(CAMERA_TCS);
@@ -1757,6 +1827,8 @@ rails(bool on)
 #define PLL_ALPHA_VAL           0x40
 
 static bool pll_on;
+static const uint32_t renoir_pll_regs[] = { 0,4,8,0xc,0x10,0x14,0x18,0x1c,0x20,0x24,0x28,0x2c,0x38,0x40 };
+static uint32_t renoir_pll_saved[sizeof(renoir_pll_regs)/sizeof(renoir_pll_regs[0])];
 
 static bool
 camcc_any(uint32_t offset, uint32_t value, uint32_t check)
@@ -1785,14 +1857,26 @@ pll0_up(void)
 		give_up("camcc's PLL0 is running already (somebody else's)");
 		return false;
 	}
+    if (camera_renoir) {
+        if ((rd(camcc + PLL_MODE) & (1u << 20)) ||
+            (rd(camcc + PLL_USER_CTL) & (1u << 21)) || rd(camcc + PLL_OPMODE) != 0) {
+            give_up("Renoir PLL0 already in use"); return false;
+        }
+        for (unsigned i=0;i<sizeof(renoir_pll_regs)/sizeof(renoir_pll_regs[0]);i++)
+            renoir_pll_saved[i]=rd(camcc+renoir_pll_regs[i]);
+        pll_on=true;
+    }
 	for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
-		if (!camcc_any(config[i].offset, config[i].value, ~0u)) {
+        uint32_t value = camera_renoir && config[i].offset==PLL_CONFIG_CTL_U1 ? 0x2a9a699c : config[i].value;
+		if (!camcc_any(config[i].offset, value, ~0u)) {
 			return false;
 		}
 	}
+    if (camera_renoir && (!camcc_any(0x24,0,~0u) || !camcc_any(0x28,0,~0u) ||
+        !camcc_any(0x2c,0x01800000,~0u))) return false;
 	pll_on = true;
 	/* clk_lucid_pll_configure(): update bypass, outputs off, standby, out of reset */
-	if (!camcc_any(PLL_MODE, rd(camcc + PLL_MODE) | 1u << 23, 1u << 23) || !camcc_any(PLL_MODE, rd(camcc + PLL_MODE) & ~1u, 1) ||
+	if ((!camera_renoir && !camcc_any(PLL_MODE, rd(camcc + PLL_MODE) | 1u << 23, 1u << 23)) || !camcc_any(PLL_MODE, rd(camcc + PLL_MODE) & ~1u, 1) ||
 	    !camcc_any(PLL_OPMODE, 0, 1) || !camcc_any(PLL_MODE, rd(camcc + PLL_MODE) | 1u << 2, 1u << 2)) {
 		return false;
 	}
@@ -1823,6 +1907,10 @@ pll0_down(void)
 	wr(camcc + PLL_USER_CTL, rd(camcc + PLL_USER_CTL) & ~7u);
 	wr(camcc + PLL_OPMODE, 0);
 	wr(camcc + PLL_MODE, rd(camcc + PLL_MODE) & ~(1u << 2));
+    if (camera_renoir) {
+        for (int i=(int)(sizeof(renoir_pll_regs)/sizeof(renoir_pll_regs[0]))-1;i>=0;i--)
+            wr(camcc+renoir_pll_regs[i],renoir_pll_saved[i]);
+    }
 	pll_on = false;
 	say("camera: camcc's PLL0 off (mode %#x)\n", rd(camcc + PLL_MODE));
 }
@@ -1853,11 +1941,20 @@ static struct branch branches[] = {
 	{ "cpas_ahb", false, 0xc11c }, { "camnoc_axi", false, 0xc140 }, { "csiphyN", false, 0 },
 	{ "csiNphytimer", false, 0 },
 	{ "ife_lite_0_csid", false, 0xc038 }, { "ife_lite_0_cphy_rx", false, 0xc040 }, { "ife_lite_0", false, 0xc01c },
+    { "ife_lite_ahb", false, 0 }, { "ife_lite_axi", false, 0 },
 };
 
 static bool
 clocks_up(void)
 {
+    if (camera_renoir) {
+        const uint32_t cmd[]={0x7058,0xc0d4,0xa068,0,0xc01c,0xc000};
+        const uint32_t source[]={2,2,3,2,3,3}, divider[]={14,3,1,3,1,1};
+        const uint32_t cbcr[]={0x26010,0x26018,0xc0d0,0xc0f0,0,0,0xc034,0xc03c,0xc018,0xc040,0xc044};
+        for(unsigned i=0;i<6;i++){rcgs[i].cmd=cmd[i];rcgs[i].source=source[i];rcgs[i].divider=divider[i];}
+        for(unsigned i=0;i<11;i++)branches[i].cbcr=cbcr[i];
+    }
+
 	/* (the sensor's CSIPHY: its own branch and timer) */
 	rcgs[3].cmd = hw->timer_cmd;
 	branches[4].cbcr = hw->phy_cbcr;
@@ -1867,6 +1964,7 @@ clocks_up(void)
 		uint32_t cfg = r->cmd + 4;
 
 		r->found_cfg = rd(camcc + cfg);
+        r->set = true;
 		if (!camcc_any(cfg, (r->found_cfg & ~0x371fu) | r->source << 8 | r->divider, 0x371f)) {
 			return false;
 		}
@@ -1881,10 +1979,12 @@ clocks_up(void)
 	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
 		struct branch *b = &branches[i];
 		vm_offset_t base = b->gcc ? gcc : camcc;
+        if (b->cbcr == 0) continue;
 
 		if (rd(base + b->cbcr) & 1) {
 			continue;               /* (on already: left on at the end too) */
 		}
+        b->set = true;
 		wr(base + b->cbcr, rd(base + b->cbcr) | 1);
 		if (!(rd(base + b->cbcr) & 1)) {
 			say("camera: the branch %s does not take its enable (%#x)\n", b->name, rd(base + b->cbcr));
@@ -2013,9 +2113,9 @@ frames_alloc(uint32_t width, uint32_t height, uint32_t stride, uint32_t source)
 	strlcpy(h->sensor, !source ? "CSID TPG" : hw->chip, sizeof(h->sensor));
 	/* (what the processor wrote out of its caches; the IFE writes past them) */
 	for (vm_offset_t line = frames; line < frames + frames_bytes; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	loader_recording[0] = kvtophys(frames);
 	loader_recording[1] = frames_bytes;
 	loader_recording[2] = (uint64_t)frames;
@@ -2109,9 +2209,9 @@ smmu_up(void)
 		}
 	}
 	for (vm_offset_t line = page_tables; line < page_tables + (2 + thirds) * 4096; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	table_root = kvtophys(page_tables) | (uint64_t)smmu_context_n << 48;
 	say("camera: SMMU: context %u gets our tables for %llu KB at %#llx; match register %u sends streams %#x/%#x through it\n",
 	    smmu_context_n, frames_bytes >> 10, FRAME_ADDRESSES, smmu_match, IFE_STREAM, IFE_STREAM_MASK);
@@ -2198,9 +2298,9 @@ smmu_down(void)
 
 /* ---- CSID-lite 0 and IFE-lite 0 ----------------------------------------------------------------------- */
 
-#define CSID_PHYS               0x0acc8000UL
-#define IFE_PHYS                0x0acc4000UL
-#define CSIPHY_PHYS(n)          (0x0ace0000UL + 0x2000UL * (n))
+#define CSID_PHYS               (camera_renoir ? 0x0acd9200UL : 0x0acc8000UL)
+#define IFE_PHYS                (camera_renoir ? 0x0acd9000UL : 0x0acc4000UL)
+#define CSIPHY_PHYS(n)          ((camera_renoir ? 0x0ac6a000UL : 0x0ace0000UL) + 0x2000UL * (n))
 
 #define CSID_HW_VERSION         0x000
 #define CSID_RST_STROBES        0x010
@@ -2244,6 +2344,11 @@ smmu_down(void)
 #define CSID_TPG_COMMON_GEN_CFG 0x648
 #define TPG_VC                  0xa
 #define RAW10_DT                0x2b
+#define IFE_RDI_UPDATE          (camera_renoir ? 1u : 2u)
+#define BUS_FRAME_DONE          (camera_renoir ? 16u : 1u)
+#define FRAME_IRQ_STATUS        (camera_renoir ? 0x1a28 : BUS_IRQ_STATUS1)
+#define FRAME_TOP_STATUS        (camera_renoir ? IFE_IRQ_STATUS1 : IFE_IRQ_STATUS0)
+#define FRAME_TOP_CLEAR         (camera_renoir ? IFE_IRQ_CLEAR1 : IFE_IRQ_CLEAR0)
 /*
  * A line's bytes as the write master lays them out: RAW10 (four pixels in five bytes), the line
  * rounded up to 16 bytes, the bus's width (a 4000-pixel line takes 5008, not 5000).
@@ -2251,34 +2356,34 @@ smmu_down(void)
 #define RAW10_STRIDE(width)     (((width) * 10 / 8 + 15) & ~15u)
 
 #define IFE_HW_VERSION          0x0000
-#define IFE_GLOBAL_RESET        0x0018
-#define IFE_IRQ_MASK0           0x005c
-#define IFE_IRQ_MASK1           0x0060
-#define IFE_IRQ_CLEAR0          0x0064
-#define IFE_IRQ_CLEAR1          0x0068
-#define IFE_IRQ_STATUS0         0x006c
-#define IFE_IRQ_STATUS1         0x0070
-#define IFE_IRQ_GLOBAL_CLEAR    0x0058
-#define IFE_VIOLATION_STATUS    0x007c
-#define IFE_REG_UPDATE          0x04ac
-#define BUS_HW_VERSION          0x2000
+#define IFE_GLOBAL_RESET        (camera_renoir ? 0xc : 0x0018)
+#define IFE_IRQ_MASK0           (camera_renoir ? 0x28 : 0x005c)
+#define IFE_IRQ_MASK1           (camera_renoir ? 0x2c : 0x0060)
+#define IFE_IRQ_CLEAR0          (camera_renoir ? 0x34 : 0x0064)
+#define IFE_IRQ_CLEAR1          (camera_renoir ? 0x38 : 0x0068)
+#define IFE_IRQ_STATUS0         (camera_renoir ? 0x40 : 0x006c)
+#define IFE_IRQ_STATUS1         (camera_renoir ? 0x44 : 0x0070)
+#define IFE_IRQ_GLOBAL_CLEAR    (camera_renoir ? 0x24 : 0x0058)
+#define IFE_VIOLATION_STATUS    (camera_renoir ? 0x1a64 : 0x007c)
+#define IFE_REG_UPDATE          (camera_renoir ? 0x20 : 0x04ac)
+#define BUS_HW_VERSION          (camera_renoir ? 0x1a00 : 0x2000)
 #define BUS_CGC_OVD             0x200c
 #define BUS_IRQ_MASK1           0x2048
 #define BUS_IRQ_CLEAR0          0x2050
-#define BUS_IRQ_CLEAR1          0x2054
+#define BUS_IRQ_CLEAR1          (camera_renoir ? 0x1a20 : 0x2054)
 #define BUS_IRQ_CLEAR2          0x2058
-#define BUS_IRQ_STATUS0         0x205c
-#define BUS_IRQ_STATUS1         0x2060
-#define BUS_IRQ_STATUS2         0x2064
-#define BUS_IRQ_GLOBAL_CLEAR    0x2068
-#define BUS_COMP_ERROR          0x206c
+#define BUS_IRQ_STATUS0         (camera_renoir ? 0x1a28 : 0x205c)
+#define BUS_IRQ_STATUS1         (camera_renoir ? 0x1a2c : 0x2060)
+#define BUS_IRQ_STATUS2         (camera_renoir ? 0x1a2c : 0x2064)
+#define BUS_IRQ_GLOBAL_CLEAR    (camera_renoir ? 0x1a30 : 0x2068)
+#define BUS_COMP_ERROR          (camera_renoir ? 0x1a70 : 0x206c)
 #define BUS_ADDR_SYNC_FRAME_HDR 0x2080
 #define BUS_ADDR_SYNC_NO_SYNC   0x2084
 #define BUS_TEST_CTRL           0x211c
-#define WM0_STATUS0             0x2200
-#define WM0_STATUS1             0x2204
-#define WM0_CFG                 0x2208
-#define WM0_IMAGE_ADDR          0x2214
+#define WM0_STATUS0             (camera_renoir ? 0x1c7c : 0x2200)
+#define WM0_STATUS1             (camera_renoir ? 0x1c80 : 0x2204)
+#define WM0_CFG                 (camera_renoir ? 0x1c00 : 0x2208)
+#define WM0_IMAGE_ADDR          (camera_renoir ? 0x1c04 : 0x2214)
 #define WM0_IMAGE_ADDR_OFFSET   0x2218
 #define WM0_WIDTH               0x221c
 #define WM0_HEIGHT              0x2220
@@ -2288,7 +2393,7 @@ smmu_down(void)
 #define WM0_IRQ_SUB_PATTERN     0x224c
 #define WM0_FRAMEDROP_PERIOD    0x2250
 #define WM0_FRAMEDROP_PATTERN   0x2254
-#define WM0_FRAME_INC           0x2258
+#define WM0_FRAME_INC           (camera_renoir ? 0x1c08 : 0x2258)
 #define WM0_BURST_LIMIT         0x225c
 
 static vm_offset_t csid, ife, csiphy;
@@ -2299,7 +2404,7 @@ static bool
 blk_put(vm_offset_t base, const char *what, uint32_t offset, uint32_t value, bool check)
 {
 	wr(base + offset, value);
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	if (check && rd(base + offset) != value) {
 		say("camera: %s %#x <- %#x, but it reads %#x\n", what, offset, value, rd(base + offset));
 		give_up("a camera register that did not read back");
@@ -2318,6 +2423,28 @@ wait_reg(vm_offset_t base, uint32_t offset, uint32_t mask, uint32_t want, uint32
 		spin_us(10);
 	}
 	return false;
+}
+
+static bool
+rcam_put(void *ctx, uint32_t reg, uint32_t value, bool check)
+{
+    return blk_put((vm_offset_t)ctx, "Renoir camera", reg, value, check);
+}
+static bool
+rcam_wait(void *ctx, uint32_t reg, uint32_t mask, uint32_t want, uint32_t us)
+{
+    return wait_reg((vm_offset_t)ctx, reg, mask, want, us);
+}
+static void
+rcam_delay(void *ctx, uint32_t us)
+{
+    (void)ctx;
+    spin_us(us);
+}
+static struct rcam_io
+rcam_bus(vm_offset_t base)
+{
+    return (struct rcam_io){ .context=(void *)base, .put=rcam_put, .wait=rcam_wait, .delay=rcam_delay };
 }
 
 /* cam_ife_csid_global_reset() and reset_regs(): interrupts masked and cleared, then the registers, then the hardware. */
@@ -2370,8 +2497,8 @@ csid_config(int phy, unsigned lanes, uint32_t lane_cfg, uint32_t vc, uint32_t wi
 	uint32_t cfg0 = vc << 22 | RAW10_DT << 16 | 0u << 27 | 0xfu << 12 | 0u << 10 | 1u << 2 | 3u;
 
 	if (!blk_put(csid, "CSID", CSID_CSI2_RX_CFG0, (lanes - 1) | lane_cfg << 4 | (uint32_t)cphy << 24 |
-	    (uint32_t)(phy < 0 ? 0 : phy & 3) << 20,
-	    true) || !blk_put(csid, "CSID", CSID_CSI2_RX_CFG1, 1u << 6 | 1u, true)) {
+	    (uint32_t)(phy < 0 ? 0 : phy & (camera_renoir ? 7 : 3)) << 20,
+	    true) || !blk_put(csid, "CSID", CSID_CSI2_RX_CFG1, 1u << 6 | 1u | (vc > 3 ? 4u : 0u), true)) {
 		return false;
 	}
 	if (phy < 0) {
@@ -2418,6 +2545,17 @@ tpg_start(void)
 static bool
 ife_config(uint64_t address, uint32_t frame_bytes, uint32_t frame_inc)
 {
+    if (camera_renoir) {
+        struct rcam_io io = rcam_bus(ife);
+        ife_running = true; /* all partial configuration is quiesced on error */
+        if (!rcam_ife_start(&io, address, frame_bytes, frame_inc)) {
+            give_up("Renoir IFE580 reset or bus-v3 setup failed");
+            return false;
+        }
+        say("camera: IFE-lite580 bus-v3 RDI0 configured\n");
+        return true;
+    }
+
 	blk_put(ife, "IFE", IFE_IRQ_MASK0, 1u << 31, false);
 	blk_put(ife, "IFE", IFE_GLOBAL_RESET, 0x3f9f, false);
 	if (!wait_reg(ife, IFE_IRQ_STATUS0, 1u << 31, 1u << 31, 100000)) {
@@ -2442,17 +2580,26 @@ ife_config(uint64_t address, uint32_t frame_bytes, uint32_t frame_inc)
 	}
 	ife_running = true;
 	/* the RDI 0 resource's start: its register update */
-	return blk_put(ife, "IFE", IFE_REG_UPDATE, 0x2, false);
+	return blk_put(ife, "IFE", IFE_REG_UPDATE, IFE_RDI_UPDATE, false);
 }
 
 static void
 show_paths(const char *when)
 {
+    if(camera_renoir) {
+        say("camera: %s: CSID580 RX %#x RDI %#x bytes %u/%u; IFE580 IRQ %#x/%#x/%#x; bus IRQ %#x/%#x CCIF %#x overflow %#x size %#x; WM status %#x/%#x\n",
+            when,rd(csid+CSID_CSI2_RX_IRQ_STATUS),rd(csid+CSID_RDI0_IRQ_STATUS),
+            rd(csid+CSID_RDI0_BYTES_PING),rd(csid+CSID_RDI0_BYTES_PONG),
+            rd(ife+0x40),rd(ife+0x44),rd(ife+0x48),rd(ife+0x1a28),rd(ife+0x1a2c),
+            rd(ife+0x1a64),rd(ife+0x1a68),rd(ife+0x1a70),rd(ife+0x1c7c),rd(ife+0x1c80));
+        return;
+    }
+
 	say("camera: %s: CSID rx irq %#x, packets %u, ecc %#x, crc %u; RDI0 irq %#x status %#x, bytes %u/%u; IFE irq %#x %#x, "
 	    "violation %#x; bus irq %#x %#x %#x, comp error %#x; WM0 status %#x %#x\n", when, rd(csid + CSID_CSI2_RX_IRQ_STATUS),
 	    rd(csid + CSID_CSI2_RX_PKTS), rd(csid + CSID_CSI2_RX_ECC), rd(csid + CSID_CSI2_RX_CRC), rd(csid + CSID_RDI0_IRQ_STATUS),
 	    rd(csid + CSID_RDI0_STATUS), rd(csid + CSID_RDI0_BYTES_PING), rd(csid + CSID_RDI0_BYTES_PONG), rd(ife + IFE_IRQ_STATUS0),
-	    rd(ife + IFE_IRQ_STATUS1), rd(ife + IFE_VIOLATION_STATUS), rd(ife + BUS_IRQ_STATUS0), rd(ife + BUS_IRQ_STATUS1),
+	    rd(ife + IFE_IRQ_STATUS1), rd(ife + IFE_VIOLATION_STATUS), rd(ife + BUS_IRQ_STATUS0), rd(ife + FRAME_IRQ_STATUS),
 	    rd(ife + BUS_IRQ_STATUS2), rd(ife + BUS_COMP_ERROR), rd(ife + WM0_STATUS0), rd(ife + WM0_STATUS1));
 }
 
@@ -2472,8 +2619,9 @@ paths_down(void)
 		csid_running = false;
 	}
 	if (ife_running) {
+        if (camera_renoir) { struct rcam_io io=rcam_bus(ife); rcam_ife_stop(&io); }
 		wr(ife + WM0_CFG, 0);
-		wr(ife + IFE_REG_UPDATE, 0x2);
+		wr(ife + IFE_REG_UPDATE, IFE_RDI_UPDATE);
 		spin_us(1000);
 		ife_running = false;
 	}
@@ -2483,8 +2631,11 @@ paths_down(void)
 static bool
 titan_up(void)
 {
-	static vm_offset_t csiphys[4];
+	static vm_offset_t csiphys[6];
 
+    if (rsc == 0) rsc = ml_io_map(RSC_PHYS, 0x10000);
+    if (smmu == 0) smmu = ml_io_map(SMMU_PHYS, 0x1000);
+    if (hw->csiphy >= 6) { give_up("invalid CSIPHY index"); return false; }
 	if (csid == 0) {
 		csid = ml_io_map(CSID_PHYS, 0x1000);
 		ife = ml_io_map(IFE_PHYS, 0x4000);
@@ -2536,7 +2687,7 @@ capture_tpg(void)
 	h = (struct cam_header *)frames;
 	for (unsigned ms = 0; ms < 2000; ms += 100) {
 		wait_ms(100);
-		if (rd(ife + BUS_IRQ_STATUS1) & 1) {
+		if (rd(ife + FRAME_IRQ_STATUS) & BUS_FRAME_DONE) {
 			h->frames = 1;
 			say("camera: write master 0 says its frame is done after %u ms\n", ms + 100);
 			break;
@@ -2547,14 +2698,14 @@ capture_tpg(void)
 	titan_down();
 	/* (what the IFE wrote, a look: the first bytes of the frame, past the processor's caches) */
 	for (vm_offset_t line = frames; line < frames + CAM_HEADER_BYTES + 256; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	const uint8_t *p = (const uint8_t *)(frames + CAM_HEADER_BYTES);
 	say("camera: the frame's first bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x ... (frames done: %u)\n", p[0], p[1], p[2],
 	    p[3], p[4], p[5], p[6], p[7], p[8], p[9], h->frames);
 	for (vm_offset_t line = frames; line < frames + CAM_HEADER_BYTES; line += 64) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (line));
+		__asm__ volatile ("dc cvac, %0" : : "r" (line) : "memory");
 	}
 }
 
@@ -2733,6 +2884,18 @@ csiphy_cphy(unsigned settle, uint64_t bits_per_trio)
 static bool
 csiphy_up(unsigned lanes, bool cphy, uint32_t lane_assign, unsigned settle, uint64_t bits_per_lane)
 {
+    if (camera_renoir) {
+        struct rcam_io io = rcam_bus(csiphy);
+        if (cphy || !rcam_dphy_rate_supported(bits_per_lane)) {
+            give_up("Renoir D-PHY mode exceeds the selected RX clock"); return false;
+        }
+        csiphy_running = true;
+        if (!rcam_phy_start(&io, lanes, lane_assign, settle)) {
+            give_up("Renoir CSIPHY1.2.4 setup failed"); return false;
+        }
+        return true;
+    }
+
 	static const uint8_t irq_masks[11] = { 0xff, 0xff, 0xfb, 0xff, 0x7f, 0xff, 0xff, 0xef, 0xff, 0xff, 0xff };
 	uint32_t lane_enable = 0;
 
@@ -2939,19 +3102,19 @@ capture_sensor(void)
 		/* frames one after the other into the two places, the last of `wanted' kept (the first ones come before the exposure) */
 		for (unsigned ms = 0, done = 0; ms < 5000 && done < wanted; ms += 2) {
 			sensor_delay(2000);
-			if (!(rd(ife + BUS_IRQ_STATUS1) & 1)) {
+			if (!(rd(ife + FRAME_IRQ_STATUS) & BUS_FRAME_DONE)) {
 				continue;
 			}
 			done++;
 			if (done <= 3 || done == wanted) {
 				say("camera: frame %u written, %u ms after the sensor was started\n", done, ms + 2);
 			}
-			blk_put(ife, "IFE", BUS_IRQ_CLEAR1, 1, false);
+			blk_put(ife, "IFE", BUS_IRQ_CLEAR1, BUS_FRAME_DONE, false);
 			blk_put(ife, "IFE", BUS_IRQ_GLOBAL_CLEAR, 1, false);
 			if (done < wanted) {
 				blk_put(ife, "IFE", WM0_IMAGE_ADDR, (uint32_t)(FRAME_ADDRESSES + CAM_HEADER_BYTES + (uint64_t)(done & 1) *
 				    stride * height), false);
-				blk_put(ife, "IFE", IFE_REG_UPDATE, 0x2, false);
+				blk_put(ife, "IFE", IFE_REG_UPDATE, IFE_RDI_UPDATE, false);
 			}
 			h->frames = done < CAM_FRAMES ? done : CAM_FRAMES;
 			h->last = (done - 1) & 1;
@@ -2967,14 +3130,14 @@ capture_sensor(void)
 	csiphy_down();
 	titan_down();
 	for (vm_offset_t line = frames; line < frames + CAM_HEADER_BYTES + 256; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	const uint8_t *p = (const uint8_t *)(frames + CAM_HEADER_BYTES);
 	say("camera: the frame's first bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x ... (frames done: %u)\n", p[0], p[1], p[2],
 	    p[3], p[4], p[5], p[6], p[7], p[8], p[9], h->frames);
 	for (vm_offset_t line = frames; line < frames + CAM_HEADER_BYTES; line += 64) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (line));
+		__asm__ volatile ("dc cvac, %0" : : "r" (line) : "memory");
 	}
 }
 
@@ -3007,8 +3170,8 @@ capture_sensor(void)
 #define GAIN_UNITY              (hw->gain_unity)
 #define GAIN_MAX                (hw->gain_max)
 #define FRAME_LINES_MAX         0xfff0
-#define RDI0_SOF                (1u << 27)      /* IFE_IRQ_STATUS0 (cam_vfe_lite16x.h: sof_irq_mask of RDI 0) */
-#define WM0_DONE                1u              /* BUS_IRQ_STATUS1 */
+#define RDI0_SOF                (camera_renoir ? 1u : (1u << 27))      /* IFE_IRQ_STATUS0 (cam_vfe_lite16x.h: sof_irq_mask of RDI 0) */
+#define WM0_DONE                BUS_FRAME_DONE              /* BUS_IRQ_STATUS1 */
 
 enum { PLACE_FREE, PLACE_WRITING, PLACE_READY, PLACE_READING };
 
@@ -3135,9 +3298,9 @@ ring_alloc(uint32_t frame_bytes)
 		return false;
 	}
 	for (vm_offset_t line = ring; line < ring + ring_bytes; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	frames = ring;                  /* (what smmu_up() maps) */
 	frames_bytes = ring_bytes;
 	ring_tables_bytes = (2 + ((ring_bytes + 0x1fffff) >> 21)) * 4096;
@@ -3258,8 +3421,8 @@ ios_session(void)
 
 		wait_ms(1);
 		now = ios_ms();
-		top = rd(ife + IFE_IRQ_STATUS0);
-		bus = rd(ife + BUS_IRQ_STATUS1);
+		top = rd(ife + FRAME_TOP_STATUS);
+		bus = rd(ife + FRAME_IRQ_STATUS);
 		if (!(top & RDI0_SOF) && !(bus & WM0_DONE)) {
 			if (now - last_frame > FRAME_TIMEOUT_MS) {
 				show_paths("no frame");
@@ -3271,7 +3434,7 @@ ios_session(void)
 			}
 			continue;
 		}
-		blk_put(ife, "IFE", IFE_IRQ_CLEAR0, top & RDI0_SOF, false);
+		blk_put(ife, "IFE", FRAME_TOP_CLEAR, top & RDI0_SOF, false);
 		blk_put(ife, "IFE", IFE_IRQ_GLOBAL_CLEAR, 1, false);
 		blk_put(ife, "IFE", BUS_IRQ_CLEAR1, bus & WM0_DONE, false);
 		blk_put(ife, "IFE", BUS_IRQ_GLOBAL_CLEAR, 1, false);
@@ -3315,7 +3478,7 @@ ios_session(void)
 			}
 			if (next >= 0) {
 				blk_put(ife, "IFE", WM0_IMAGE_ADDR, (uint32_t)(FRAME_ADDRESSES + (uint64_t)next * ring_place_bytes), false);
-				blk_put(ife, "IFE", IFE_REG_UPDATE, 0x2, false);
+				blk_put(ife, "IFE", IFE_REG_UPDATE, IFE_RDI_UPDATE, false);
 			}
 		}
 		bool ask = (bus & WM0_DONE) && ios_ask.pending;
@@ -3463,9 +3626,9 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 
 		/* (what the IFE wrote went past the processor's caches) */
 		for (vm_offset_t line = at & ~63ul; line < at + n; line += 64) {
-			__asm__ volatile ("dc civac, %0" : : "r" (line));
+			__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 		}
-		__asm__ volatile ("dsb sy");
+		__asm__ volatile ("dsb sy" ::: "memory");
 		t1 = mach_absolute_time();
 		error = uiomove((caddr_t)at, (int)n, uio);
 		t2 = mach_absolute_time();
@@ -3514,9 +3677,9 @@ keep_picture(const struct redwood_camera_command *c, struct uio *uio)
 	int error = uiomove((caddr_t)(keep + CAM_HEADER_BYTES), (int)MIN((uint64_t)c->bytes, (uint64_t)uio_resid(uio)), uio);
 	h->frames = error == 0 ? 1 : 0;
 	for (vm_offset_t line = keep; line < keep + want; line += 64) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (line));
+		__asm__ volatile ("dc cvac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	loader_recording[0] = kvtophys(keep);
 	loader_recording[1] = want;
 	loader_recording[2] = (uint64_t)keep;
@@ -3793,8 +3956,8 @@ redwood_camera_init(void)
 		return;
 	}
     if (camera_renoir) {
-        if (level > 2) {
-            say("camera: Renoir capture backend not ready (CSID580/IFE580); no registers touched\n");
+        if (level > 4) {
+            say("camera: Renoir cam=5 is pending streaming/gain validation; use cam=3/4 bring-up\n");
             level = 0;
             return;
         }

@@ -43,18 +43,20 @@ static int kmem_alloc_contig(int m,uintptr_t*p,uint64_t n,int mask,int a,int b,i
 '''+profiles+init+r'''
 int main(void){
  board="renoir";
- for(asked=3;asked<=6;asked++){redwood_camera_init();assert(level==0 && threads==0 && allocations==0);}
+ for(asked=5;asked<=6;asked++){redwood_camera_init();assert(level==0 && threads==0 && allocations==0);}
  for(asked=1;asked<=2;asked++){redwood_camera_init();assert(level==asked && sensors==renoir_sensors && pmic_bus.sda==0 && pmic_bus.scl==1);}
  assert(threads==2 && allocations==0);
+ for(asked=3;asked<=4;asked++){redwood_camera_init();assert(level==asked);}
+ assert(threads==4 && allocations==2);
  assert(sensors[1].vdig.mv==1056 && sensors[1].vaf.ldo==3);
  assert(sensors[2].vana.gpio==176 && sensors[2].vdig.gpio==177);
  assert(sensors[0].csiphy==0 && sensors[1].csiphy==1 && sensors[2].csiphy==5 && sensors[3].csiphy==3);
  for(unsigned i=0;i<SENSOR_COUNT;i++)assert(strncmp(sensors[i].tab,"camera-renoir-",14)==0);
- board="unknown";asked=2;redwood_camera_init();assert(threads==2);
- board="redwood";asked=5;redwood_camera_init();assert(threads==3 && allocations==1);
+ board="unknown";asked=2;redwood_camera_init();assert(threads==4);
+ board="redwood";asked=5;redwood_camera_init();assert(threads==5 && allocations==3);
  /* the default pointer still refers to valid Redwood data before a selection */
  assert(hw==redwood_sensors);
- puts("Camera board: Renoir probe admission, capture rejection before allocation, isolated tables and unknown-board guard passed");
+ puts("Camera board: Renoir probe admission, cam3/4 admission and cam5 rejection before allocation, isolated tables and unknown-board guard passed");
 }
 '''
 with tempfile.TemporaryDirectory() as d:

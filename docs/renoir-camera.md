@@ -1,8 +1,9 @@
 # Renoir camera port: implementation checkpoint, 2026-10-19
 
 Status: NOT working yet. The five upstream camera source changes are integrated and build,
-Renoir now has explicit cam=1 inspection and cam=2 sensor-power/ID bring-up.
-Capture cam>=3 remains rejected before allocation or MMIO until its backend is ported.
+Renoir now has cam=1 inspection, cam=2 sensor-power/ID, cam=3 TPG and cam=4 RAW
+capture implementations. Hardware capture is still untested. cam=5 iOS streaming
+remains disabled. See renoir-camera580.md for the implemented backend and tests.
 User requires working camera support, not just common-code integration. APFS and flash changes
 are explicitly excluded; retain packfs RAM boot and fastboot boot only.
 
@@ -56,18 +57,19 @@ This downloads only to the host. The build consumes these tables through packfs.
   the front module wraps it in cameraModuleData, unlike the original assumptions.
 - Build packs board-prefixed camera-renoir-*.tab in the existing packfs /fw.
   No Redwood table fallback; no APFS, UFS or flash changes.
-- Renoir cam=1/2 accepted for explicit bring-up; cam>=3 refused before MMIO.
+- Renoir cam=1/2 power bring-up and cam=3/4 TPG/RAW capture are available; cam=5 refused before MMIO.
   Default boot does not enable cameras, and loader camera advertisement remains off.
 
-## Capture backend work still required
+## Capture backend checkpoint (superseded by renoir-camera580.md)
 
 The live DT identifies CSID/IFE-lite580 and CSIPHY1.2.4. OKX maps the first two
 onto cam_ife_csid_lite_480_reg_offset and cam_vfe_lite48x_hw_info; CSIPHY1.2.4
 uses 1.2.3 register tables with dynamic clock voting. This is not the Redwood
 IFE-lite16x register layout. Actual bases are CSID-lite0 0x0acd9200,
 IFE-lite0 0x0acd9000, CSIPHY0 0x0ac6a000 (stride 0x2000).
-Clocks, CPAS, SMMU stream matching, IRQ bits, bus-v3 write masters and sensor
-exposure/gain semantics still need a separate backend before enabling capture.
+Clocks, SMMU stream matching, IRQ bits and bus-v3 write masters now have a separate
+Renoir cam=3/4 implementation. Physical validation and sensor exposure/gain/AF
+semantics are still required before iOS streaming.
 In particular IMX355's gain law must not be assumed to be Samsung's linear gain.
 
 ## Next hardware test and subsequent implementation
@@ -88,7 +90,7 @@ sensor tables present in root/fw. Host tests pass:
 - test_camsensor_driver.py: flat/wrapped driver and absent/truncated symbol.
 - test_renoir_camera_power.py: real supply functions, dual GPIOs, partial failure,
   previously-on rail preservation, VAF and unsupported power step.
-- test_renoir_camera_board.py: actual init; Renoir capture rejected before thread/
+- test_renoir_camera_board.py: actual init; Renoir cam=3/4 admitted and cam=5 rejected before thread/
   allocation, distinct table names and unknown-board guard.
 - test_camera_isp.py: actual ISP, RAW10 black/grey/white, all Bayer orders, output
   ranges, row-band equivalence and output stride padding under ASan/UBSan.
