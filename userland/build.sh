@@ -78,12 +78,15 @@ if [ -n "$WIFID" ]; then
 	fi
 	IOS_JOBS="$IOS_JOBS com.apple.wifid"
 fi
+# @apps matches executables under /Applications/ and the app bundle container paths.
+# It needs the current kernel parser; applications use their own UIKit status bars.
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libredwood.dylib, src/inject_sb.c is libredwood-sb.dylib, src/inject_media.c is
 # libredwood-media.dylib).
 INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system
 /redwood/lib/libredwood-sb.dylib SpringBoard
-/redwood/lib/libredwood-media.dylib mediaserverd"}
+/redwood/lib/libredwood-media.dylib mediaserverd
+/redwood/lib/libredwood-statusbar.dylib @apps"}
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -152,7 +155,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libredwood.dylib src/inject.c
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib -framework CoreFoundation -framework IOKit -lobjc \
-			-o obj/libredwood-sb.dylib src/inject_sb.c
+			-o obj/libredwood-sb.dylib src/inject_sb.c src/statusbar.c
+		$DYN -dynamiclib -install_name /redwood/lib/libredwood-statusbar.dylib -framework CoreFoundation -framework IOKit -lobjc \
+			-o obj/libredwood-statusbar.dylib src/statusbar.c
 		$DYN -O2 -dynamiclib -install_name /redwood/lib/libredwood-media.dylib -framework CoreFoundation -framework CoreMedia \
 			-framework CoreVideo -framework IOSurface -lobjc \
 			-o obj/libredwood-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
@@ -191,6 +196,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	for f in $EXTRA; do cp "$f" root/bin/; done
 	mkdir -p root/lib
 	cp obj/libredwood.dylib obj/libredwood-sb.dylib root/lib/
+	[ -f obj/libredwood-statusbar.dylib ] && cp obj/libredwood-statusbar.dylib root/lib/
 	[ -f obj/libredwood-media.dylib ] && cp obj/libredwood-media.dylib root/lib/     # (as with cpu_test)
 	if [ -f obj/RedwoodAudio ]; then
 		mkdir -p root/lib/RedwoodAudio.driver

@@ -339,7 +339,7 @@ index 95192dd..b00da80 100644
  
  	/*
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 1d71c66..024ead8 100644
+index 1d71c66..385e1c7 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -1157,6 +1157,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
@@ -439,7 +439,7 @@ index 1d71c66..024ead8 100644
  			    imgp->ip_vfs_context);
  
  			error = open1(imgp->ip_vfs_context, ndp,
-@@ -5586,10 +5646,61 @@ bad:
+@@ -5586,10 +5646,67 @@ bad:
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -484,7 +484,13 @@ index 1d71c66..024ead8 100644
 +			while (*p != 0 && *p != ' ' && *p != ';') {
 +				p++;
 +			}
-+			if ((size_t)(p - word) == namelen && namelen != 0 && liblen != 0 && strncmp(word, name, namelen) == 0) {
++			/* @apps covers bundle executables, including names containing spaces. */
++			const char *path = imgp->ip_strings + strlen(EXECUTABLE_KEY);
++			bool app = (size_t)(p - word) == 5 && strncmp(word, "@apps", 5) == 0 &&
++			    (strncmp(path, "/Applications/", 14) == 0 ||
++			    strncmp(path, "/private/var/containers/Bundle/Application/", 43) == 0 ||
++			    strncmp(path, "/var/containers/Bundle/Application/", 35) == 0);
++			if (liblen != 0 && (app || ((size_t)(p - word) == namelen && namelen != 0 && strncmp(word, name, namelen) == 0))) {
 +				snprintf(env, size, "DYLD_INSERT_LIBRARIES=%.*s", (int)liblen, library);
 +				return true;
 +			}
@@ -501,7 +507,7 @@ index 1d71c66..024ead8 100644
  	int error = 0;
  	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
  	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
-@@ -5759,6 +5870,33 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5759,6 +5876,33 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  
@@ -535,7 +541,7 @@ index 1d71c66..024ead8 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
-@@ -6636,7 +6774,23 @@ handle_mac_transition:
+@@ -6636,7 +6780,23 @@ handle_mac_transition:
  	}
  
  	/* Update the process' identity version and set the security token */
@@ -560,7 +566,7 @@ index 1d71c66..024ead8 100644
  	task_set_uniqueid(task);
  	set_security_token_task_internal(p, task);
  
-@@ -7538,6 +7692,11 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7538,6 +7698,11 @@ process_signature(proc_t p, struct image_params *imgp)
  	}
  
  done:
