@@ -4322,7 +4322,9 @@ ios_select(unsigned index, uint32_t mode_n)
 {
     if (camera_renoir) {
         if (index != 1 && index != 2) return false;
-        if (mode_n == ~0u) mode_n = index == 1 ? 7 : 1;
+        /* GW3 res7 is a 1:1 central Quad-Bayer crop. Res1 bins the full
+         * sensor 2x2 to 4640x3472; front res1 is its full-FOV binned mode. */
+        if (mode_n == ~0u) mode_n = 1;
     }
 	select_sensor(index);
 	if (!fake) {

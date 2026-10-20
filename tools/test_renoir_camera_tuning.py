@@ -60,4 +60,16 @@ with tempfile.TemporaryDirectory() as tmp:
   _,offset,size=syms[sid];raw=data[pool+offset:pool+offset+size]
   assert size>0 and size%196==0
   assert all(struct.unpack_from('<I',raw,k)[0]==1 for k in range(0,size,196)),name
+  if 's5kgw3_wide' in name:
+   def values(i):return data[pool+syms[i][1]:pool+syms[i][1]+syms[i][2]]
+   def mode_regs(m):
+    words=struct.unpack_from('<49I',raw,196*m)
+    return {r:v for r,v,*_ in camsensor.regsetting(data,pool,syms,values,words[24])}
+   full,crop=mode_regs(1),mode_regs(7)
+   assert full[0x0344]==0 and full[0x0346]==0 and full[0x0900]==0x0122
+   assert full[0x034c]==4640 and full[0x034e]==3472
+   assert crop[0x0344]>0 and crop[0x0346]>0 and crop[0x0900]==0x0111
+   assert 0 <= (full[0x0348]+1)//2-full[0x034c] <= 32 # optical-black border
+   assert 0 <= (full[0x034a]+1)//2-full[0x034e] <= 32
+   print('GW3 native mode1: full sensor width, 2x2 binning, 4640x3472; mode7 is central 1:1 crop')
  print('Vendor profiles: five pinned blobs, four LSC40 exports, main/front native GBRG modes passed')

@@ -1,8 +1,28 @@
 # Renoir CSID580 / IFE-lite580 RAW capture
 
 Implemented in redwood_camera.c and portable renoir_camera_core.h. Real Renoir
-hardware bring-up now receives recognizable S5KGW3 RAW frames. iOS Camera preview
-and photo capture are still disabled pending streaming/exposure validation.
+hardware bring-up receives recognizable S5KGW3 RAW frames. With camera streaming
+explicitly enabled, real main-camera frames now reach Camera.app through
+mediaserverd and the software ISP. Normal camera-disabled boot remains available.
+Photo saving and front-camera preview in Camera.app still need device validation.
+
+## Device validation, 20 October 2026
+
+- Fixed recursive Renoir rail dispatch and restart admission after a drained ring
+  (14a760c). The generic ARM MMIO VA window was also too small for simultaneous
+  GPU, Wi-Fi, audio and camera mappings; a033a49 expands this board's reservation
+  to 64 MiB while retaining the Apple default. This reserves VA, not physical RAM.
+- GW3 native mode 7 is a central 2432x1824 unbinned crop. Main-camera default is
+  now native mode 1, full-field 2x2 binning to 4640x3472. The user reports normal
+  framing after this change; color accuracy has not been independently calibrated.
+- Native DW9800 initialization acknowledges over CCI. A tap reached the contrast
+  AF sweep: sharpness rose from 0.065 to 1.554 and the fine search settled at
+  position 568. In a subsequent stationary, lit-text test the user confirmed that
+  focus holds. Search speed remains slow; this is contrast AF, not vendor PDAF.
+- All device launches use temporary RAM images through fastboot boot; no partition
+  is flashed or erased. These observations do not establish shutter/Photos,
+  video recording, front-camera UI, or sleep/wake reliability.
+
 
 ## Primary source audit
 
