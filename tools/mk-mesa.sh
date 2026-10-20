@@ -20,6 +20,24 @@
 #   gl.xml               their prototypes (the Khronos registry as Mesa has it): for userland/mkeagl.py
 # Needs on this machine: meson, ninja, bison, flex, python3 with venv (Mako is installed into a
 # private environment), llvm-ar.
+#
+# This build is NOT reproducible byte for byte, so do not compare one of its outputs with another
+# by hash. Measured on 20 October: two builds from the same source tree, the second with
+# build-softpipe-freedreno deleted first, gave different libOSMesa.8.dylib and air_run -- same size
+# to the byte, 9 132 774 of 14 855 048 bytes different in the library and 4 171 752 of 9 789 824 in
+# air_run, with 5 of the 6 named text symbols at new addresses. So the layout moves between builds.
+# What moves it was not established; it is not source filenames, which -Db_ndebug=true compiles out.
+#
+# This is Mesa's property and not the build system's, which is worth knowing before anyone
+# distrusts every hash here: the userland programs reproduce exactly. prebuilt/userland/init built
+# in one working copy came out byte for byte identical to the same source built in another, at a
+# different time -- so there a hash does compare builds, and only for Mesa it does not.
+#
+# The practical consequence: a hash answers whether this is the same FILE, never whether it holds
+# the same CODE, and the size answers neither -- the one-line ir3 rounding patch
+# (tools/mesa/ir3-round-default.patch) produced a library of exactly the same 14 855 048 bytes as
+# the build without it. To tell whether a patch is in a build, read the source in
+# xnu-deps/build/mesa/mesa-$VERSION, which is where this script unpacks and patches it.
 set -e
 VERSION=25.0.7
 SHA256=592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6
@@ -46,6 +64,11 @@ fi
 # ours, kept in the repository: always the current ones
 rm -rf mesa-$VERSION/src/redwood-drm
 cp -r "$ROOT/tools/mesa/redwood-drm" mesa-$VERSION/src/redwood-drm
+# the AIR frontend (docs/air.md): the Metal runtime will call it in this
+# library's own process, and tools/mesa/air-frontend.patch is the meson that
+# reaches it. Copied rather than linked, because this tree is cross-built.
+rm -rf mesa-$VERSION/src/compiler/air
+cp -r "$ROOT/tools/mesa/air" mesa-$VERSION/src/compiler/air
 if [ ! -x venv/bin/python3 ]; then
 	python3 -m venv venv
 	venv/bin/pip -q install mako pyyaml packaging
@@ -83,6 +106,14 @@ BUILD=build-${DRIVERS//,/-}
 	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-vdpau=disabled -Dgallium-va=disabled \
 	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
 ninja -C $BUILD > ninja.log
+# air_run draws with a translated Metal shader and reads the pixels back; it is
+# the only way to find out whether the Adreno takes work that did not come from
+# the window server. Built only when asked, since it is a test program.
+if [ "${AIR:-}" = 1 ]; then
+	ninja -C $BUILD src/gallium/drivers/freedreno/air_run >> ninja.log
+	cp $BUILD/src/gallium/drivers/freedreno/air_run out/air_run
+	echo "mk-mesa.sh: $B/out/air_run ($(stat -c %s out/air_run) bytes)"
+fi
 
 llvm-strip -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
 install_name_tool -id /redwood/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib

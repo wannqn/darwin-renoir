@@ -18,9 +18,25 @@
 #                                   init hands the list to the kernel (etc/inject.conf -> sysctl kern.exec_inject)
 #                      EXTRA="..."  more programs for /redwood/bin (files on this machine): one-off
 #                                   diagnostics, which a file given as RC_JOBS can then run
+#                      EXTRA_SHARE="..." directories on this machine to copy whole into /redwood/share,
+#                                   each under its own name: the data a one-off diagnostic reads, when it
+#                                   needs more than a program (tools/air/intrincheck.py --emit writes such
+#                                   a directory). This goes into the boot volume, which every recipe
+#                                   carries and which the flash recipe puts in RAM, so its size is paid
+#                                   for at every boot -- a few megabytes, not more
 #                      RC_JOBS=<file> what the job com.redwood.demo runs: rc.jobs (default), or
 #                                   rc.jobs.unlock, which also swipes the lock screen away (for the phone,
-#                                   where nothing else can touch the screen yet)
+#                                   where nothing else can touch the screen yet).
+#                                   A job list cannot assume a shell. iOS 16.5's own root has none at all
+#                                   -- /bin is df and ps, and nothing else -- so a line beginning /bin/sh
+#                                   fails with "No such file or directory" and status 127 on a flash-root
+#                                   boot. The /var/jb/bin/sh that rc.jobs.jb and rc.jobs.sileo run is the
+#                                   package manager's prefix, which only a JB=1 image carries. And init
+#                                   runs these lines itself (src/init.c, run_command): words split on
+#                                   blanks, no quoting, no variable assignment, no redirection beyond a
+#                                   trailing ">> FILE" and "&". So a program that needs a value passed to
+#                                   it needs an option for it, not an environment variable -- which is why
+#                                   air_run grew --buffer.
 #                      GL=1         with an OpenGL ES implementation for the window server: Mesa
 #                                   (tools/mk-mesa.sh fetches and builds it) behind src/eagl.c, as
 #                                   lib/libOSMesa.8.dylib (15 MB) and lib/libredwood-gl.dylib. Where the
@@ -58,6 +74,18 @@ LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
 DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
 IOS=../ios165
 CACHE=$IOS/20F66__iPhone10,3_6
+# ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
+# tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
+# cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
+# happened on 19 October 2026: 491 LaunchDaemons, NanoLaunchDaemons, LaunchAngels, xpc/launchd.plist and
+# private/var went out of the main copy's tree, and only the hard links in the other copies still held them.
+for d in rootfs cryptex cryptex-app; do
+	[ -L $IOS/$d ] || continue
+	echo "build.sh: ios165/$d is a symlink to $(readlink $IOS/$d)" >&2
+	echo "build.sh: it has to be a directory of this copy's own: rm it and cp -al the original over," >&2
+	echo "build.sh: as tools/new-workspace.sh does. Building against a link damages the shared tree." >&2
+	exit 1
+done
 # The stock iOS jobs given to launchd, roughly in the order they were brought up.
 IOS_JOBS=${JOBS-"
 	com.apple.notifyd com.apple.cfprefsd.xpc.daemon com.apple.cfprefsd.xpc.daemon.system com.apple.logd
@@ -83,11 +111,21 @@ fi
 # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
 # (src/inject.c is libredwood.dylib, src/inject_sb.c is libredwood-sb.dylib, src/inject_media.c is
 # libredwood-media.dylib).
+# What Sileo runs from /bin (see the package manager's prefix below): the system image's /bin, or the
+# boot volume's bin, bound over the iOS volume's /bin when that is the root (src/init.c, flash_root).
+SILEO_BIN="chmod cp mkdir mv rm"
+# (libredwood-tweaks is the tweak loader of the package manager's prefix, src/inject_tweaks.c: in
+# SpringBoard the library above opens it, here it is named for the programs that have no library of
+# ours -- Settings, where a tweak's own pane belongs. Add a program's name to have tweaks in it.)
 INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system
 /redwood/lib/libredwood-sb.dylib SpringBoard
 /redwood/lib/libredwood-media.dylib mediaserverd
+/redwood/lib/libredwood-app.dylib Sileo
+/redwood/lib/libredwood-tweaks.dylib Preferences
 /redwood/lib/libredwood-statusbar.dylib @apps"}
 mkdir -p obj
+# Respect the local compiler toolchain even when ldid is outside PATH.
+
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
 if [ -n "$PREBUILT" ]; then
@@ -116,6 +154,15 @@ cp obj/child root/bin/child
 echo "Darwin on redwood: image built $(date '+%Y-%m-%d %H:%M')" > root/etc/motd
 # 300000 bytes, byte i = (i*31 + (i>>8)) & 0xff; init verifies it through read() and mmap()
 python3 -c "import sys; sys.stdout.buffer.write(bytes((i*31 + (i>>8)) & 0xff for i in range(300000)))" > root/share/pattern.bin
+# EXTRA_SHARE: whole directories of data for a one-off diagnostic, each under its own name. Here and
+# not in root/bin, because what goes in is not a program: a generated test suite is modules and the
+# bytes they read, and the job list runs it by its own run.sh. -L so that a directory assembled out
+# of symbolic links arrives as files, since the image is made from this tree and not from the links'
+# targets.
+for d in $EXTRA_SHARE; do
+	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
+	cp -rL "$d" root/share/
+done
 if [ -d $IOS/rootfs/usr/lib ]; then
 	if [ -z "$PREBUILT" ]; then
 		# ordinary dynamically linked programs of our own, built against the iOS SDK
@@ -135,6 +182,11 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -o obj/cpu_test src/cpu_test.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework IOSurface -o obj/cg_test src/cg_test.c
+		# what iOS here believes about Metal, and what CoreImage does without it (src/metal_test.m);
+		# OpenGLES for the CIContext made over an EAGLContext, which is deprecated and the point
+		$DYN -fobjc-arc -Wno-deprecated-declarations -framework Foundation -framework CoreGraphics \
+			-framework CoreImage -framework IOKit -framework Metal -framework OpenGLES \
+			-lMobileGestalt -o obj/metal_test src/metal_test.m
 		$DYN -o obj/shm_test src/shm_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
 		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
@@ -158,6 +210,13 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			-o obj/libredwood-sb.dylib src/inject_sb.c src/statusbar.c
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-statusbar.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libredwood-statusbar.dylib src/statusbar.c
+		# ... the tweak loader of the package manager's prefix (src/inject_tweaks.c): it goes into a
+		# program either as the one library the kernel inserts or opened by a library of ours
+		$DYN -dynamiclib -install_name /redwood/lib/libredwood-tweaks.dylib -framework CoreFoundation -lobjc \
+			-o obj/libredwood-tweaks.dylib src/inject_tweaks.c
+		# ... and inside an application, to say what killed it (src/inject_app.c)
+		$DYN -dynamiclib -install_name /redwood/lib/libredwood-app.dylib -lobjc \
+			-o obj/libredwood-app.dylib src/inject_app.c
 		$DYN -O2 -dynamiclib -install_name /redwood/lib/libredwood-media.dylib -framework CoreFoundation -framework CoreMedia \
 			-framework CoreVideo -framework IOSurface -lobjc \
 			-o obj/libredwood-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
@@ -174,7 +233,15 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 				-framework IOKit -framework IOSurface -lobjc $M/libOSMesa.8.dylib -o obj/libredwood-gl.dylib \
 				src/eagl.c src/gl_osmesa.c
 			$DYN -framework CoreFoundation -framework IOKit $M/libOSMesa.8.dylib -o obj/gl_test src/gl_test.c
+			# ... and what this GPU makes of an unsigned integer turned into a float (src/u2f_test.c)
+			$DYN $M/libOSMesa.8.dylib -o obj/u2f_test src/u2f_test.c
 			cp $M/libOSMesa.8.dylib obj/
+			# air_run draws with a Metal shader translated by the AIR frontend
+			# and reads the pixels back (docs/air.md). It is built inside the
+			# Mesa build, because it needs Gallium itself and not the gl*
+			# entry points this library exports; AIR=1 tools/mk-mesa.sh makes
+			# it, and it is copied in when it is there.
+			[ -f $M/air_run ] && cp $M/air_run obj/air_run
 		fi
 	fi
 	cp obj/hello_dyn obj/svc_test obj/surf_test obj/rwtouch obj/mg_test root/bin/
@@ -184,6 +251,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/shm_test ] && cp obj/shm_test root/bin/
 	[ -f obj/snap_test ] && cp obj/snap_test root/bin/
 	[ -f obj/font_test ] && cp obj/font_test root/bin/
+	[ -f obj/metal_test ] && cp obj/metal_test root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
@@ -198,6 +266,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	cp obj/libredwood.dylib obj/libredwood-sb.dylib root/lib/
 	[ -f obj/libredwood-statusbar.dylib ] && cp obj/libredwood-statusbar.dylib root/lib/
 	[ -f obj/libredwood-media.dylib ] && cp obj/libredwood-media.dylib root/lib/     # (as with cpu_test)
+	[ -f obj/libredwood-app.dylib ] && cp obj/libredwood-app.dylib root/lib/
+	[ -f obj/libredwood-tweaks.dylib ] && cp obj/libredwood-tweaks.dylib root/lib/
 	if [ -f obj/RedwoodAudio ]; then
 		mkdir -p root/lib/RedwoodAudio.driver
 		cp obj/RedwoodAudio root/lib/RedwoodAudio.driver/
@@ -206,11 +276,22 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	if [ -n "$GL" ]; then
 		cp obj/libOSMesa.8.dylib root/lib/
 		cp obj/gl_test root/bin/
+		if [ -f obj/u2f_test ]; then cp obj/u2f_test root/bin/; fi   # an "if": see the inject.conf loop below
+		[ -f obj/air_run ] && cp obj/air_run root/bin/
 		[ "$GL" = test ] || cp obj/libredwood-gl.dylib root/lib/
 	fi
 	# a program is not started with a library that is not there: it would not start at all
 	echo "$INJECT" | while read -r library names; do
-		[ -z "$library" ] || [ ! -f "root/lib/${library#/redwood/lib/}" ] || echo "$library $names"
+		# a /redwood/lib library only if it was actually built; any other path (e.g. a tweak loader
+		# in /var/jb) as it is, since it lives on the prefix and is there at run time
+		case "$library" in
+		"") ;;
+		# an "if" and not "&& echo": a last line whose library is absent would make the loop,
+		# and with it the pipeline and the whole build under set -e, fail -- which is what a tree
+		# with only prebuilt/userland in it does, since not every injection library is shipped there
+		/redwood/lib/*) if [ -f "root/lib/${library#/redwood/lib/}" ]; then echo "$library $names"; fi ;;
+		*) echo "$library $names" ;;
+		esac
 	done > root/etc/inject.conf
 	cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
 	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
@@ -224,8 +305,38 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		case $f in mobile/*) owner=501 ;; *) owner=0 ;; esac
 		printf 'f\t644\t%s\t%s\t/private/var/%s\t/var/%s\n' $owner $owner "$f" "$f"
 	done >> root/etc/var.skel
+	# mobile's own temporary directory, $HOME/tmp, which iOS's template does not have: an application of
+	# mobile's without a data container of its own keeps its temporary files there -- Sileo, registered from
+	# the prefix with the root on the flash, downloads every package and index there, and without it each
+	# download ended in "No such file or directory"
+	printf 'd\t700\t501\t501\t/private/var/mobile/tmp\n' >> root/etc/var.skel
+	# A key of ours for root, when there is one: ssh/authorized_keys, never in the repository (like
+	# fw-*). dropbear from the package manager's prefix reads it and lets us in over the phone's
+	# Wi-Fi, which saves rebuilding an image for every question one wants to ask a running iOS. It
+	# refuses a key whose directory anyone but its owner may write, hence the 700.
+	# SHARE=1: no keys in an image that is going to somebody else. ssh_host_ed25519_key is a
+	# private key, and it would be leaving this machine inside a 2.5 GB container
+	if [ -z "$SHARE" ] && [ -f ../ssh/authorized_keys ]; then
+		mkdir -p root/var/root/.ssh
+		printf 'd\t700\t0\t0\t/private/var/root/.ssh\n' >> root/etc/var.skel
+		# the key that lets us in, and the host's own key beside it: made here and not on the
+		# phone, because ssh-keygen asks who uid 0 is and gets "No user exists for uid 0" --
+		# it asks through libiosexec, which reads a database the bootstrap does not ship (see
+		# init.c, where it is now built at every boot); the key is made here all the same,
+		# since nothing should depend on the order of those two
+		for k in authorized_keys ssh_host_ed25519_key ssh_host_ed25519_key.pub; do
+			[ -f ../ssh/$k ] || continue
+			cp ../ssh/$k root/var/root/.ssh/$k
+			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
+		done
+	fi
 	cp ${RC:-rc.launchd} root/etc/rc
 	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
+	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
+	# lines about its own business in the first minutes and pushes everything else out of the
+	# kernel's log; the daemons keep their own standard error on the console all the same.
+	rm -f root/etc/quiet
+	[ -n "$QUIET" ] && : > root/etc/quiet
 	# the jobs the iOS launchd will see (/System/Library/LaunchDaemons is a symlink to this directory)
 	cp com.redwood.demo.plist com.redwood.wifi.plist root/LaunchDaemons/
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $IOS/rootfs root/LaunchDaemons $IOS_JOBS
@@ -256,7 +367,7 @@ fi
 # Both radio transports use the same private network file.
 mkdir -p root/fw
 rm -f root/fw/network
-if [ -f ../fw-wifi/network ]; then
+if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then
 	install -m 0600 ../fw-wifi/network root/fw/network
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
@@ -282,6 +393,20 @@ for module in ../fw-camera/renoir/com.qti.sensormodule.renoir_*.bin; do
     mkdir -p root/fw
     ../tools/camsensor.py "$module" "root/fw/camera-renoir-$sensor.tab" >/dev/null
 done
+# ... and their colour tuning (libredwood-media's processor, src/camera_isp.c), made by tools/camtuning.py out of the
+# cameras' tuning files beside them, com.qti.tuned.redwood_<maker>_<sensor>_<camera>.bin: camera-<sensor>.isp
+for tuned in ../fw-camera/com.qti.tuned.redwood_*.bin; do
+	[ -f "$tuned" ] || continue
+	sensor=$(basename "$tuned" .bin | sed 's/^com\.qti\.tuned\.redwood_[a-z]*_\([a-z0-9]*\)_.*/\1/')
+	mkdir -p root/fw
+	../tools/camtuning.py "$tuned" "root/fw/camera-$sensor.isp" >/dev/null
+done
+# Renoir colour tuning from the corresponding installed vendor modules.
+for tuned in ../fw-camera/renoir/com.qti.tuned.renoir_*.bin; do
+    [ -f "$tuned" ] || continue
+    sensor=$(basename "$tuned" .bin | sed 's/^com\.qti\.tuned\.renoir_[a-z]*_\([a-z0-9]*\)_.*/\1/')
+    ../tools/camtuning.py "$tuned" "root/fw/camera-renoir-$sensor.isp" --lsc lsc40 >/dev/null
+done
 # ... and with ADSP=1 the image of the audio DSP, from the same place into ../fw-audio (bsd/dev/redwood_adsp.c):
 # adsp.mdt and adsp.b02 to adsp.b36, 20 MB. Only when asked for: beside GL=1 the payload would be more than the 64 MB
 # the loader takes.
@@ -292,6 +417,27 @@ fi
 if [ -n "$ADSP" ] && [ -f ../fw-audio/renoir/adsp.mdt ]; then
 	mkdir -p root/fw-audio-renoir
 	install -m 0644 ../fw-audio/renoir/adsp.mdt ../fw-audio/renoir/adsp.b0[2-9] ../fw-audio/renoir/adsp.b[1-9][0-9] root/fw-audio-renoir/
+fi
+# Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
+# device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone
+# slot on 19 October 2026. It is the vendor's and never in the repository, so a copy made with bare
+# git worktree add has none of it, and neither has one whose tools/new-workspace.sh predates the fw-*
+# loop there. Say what went in and what was not there to go in; what each one is for is above.
+fwhave= fwnone=
+for d in gpu wifi haptic camera audio; do
+	if [ -d ../fw-$d ]; then fwhave="$fwhave $d"; else fwnone="$fwnone $d"; fi
+done
+echo "build.sh: fw/: $(ls -1 root/fw 2>/dev/null | wc -l) files from ../fw-*:${fwhave:- none present}${fwnone:+, absent:$fwnone}"
+# The images are what somebody would be handed to run this on a second phone, and two of the things
+# build.sh puts in them are secrets: the Wi-Fi network's name and passphrase, and the host's own
+# private key for ssh. Both are one small file inside 2.5 GB, and nobody would notice either leave.
+secrets=
+[ -f root/fw/network ] && secrets="$secrets fw/network (the name and passphrase of your Wi-Fi)"
+[ -f root/var/root/.ssh/ssh_host_ed25519_key ] &&
+	secrets="$secrets /var/root/.ssh/ssh_host_ed25519_key (a private key)"
+if [ -n "$secrets" ]; then
+	echo "build.sh: this image carries:$secrets"
+	echo "build.sh: do not pass it on as it is; SHARE=1 builds the same image without them."
 fi
 ../mkpackfs.py -o root.packfs root
 
@@ -312,7 +458,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	rm -rf sysroot/System/Library/LaunchDaemons sysroot/System/Library/NanoLaunchDaemons \
 		sysroot/System/Library/LaunchAngels sysroot/System/Library/xpc/launchd.plist
 	ln -s /redwood/LaunchDaemons sysroot/System/Library/LaunchDaemons
-	mkdir -p sysroot/redwood sysroot/sbin
+	mkdir -p sysroot/redwood sysroot/sbin sysroot/private/preboot
 	# the applications iOS installs on its first boot are system applications here (see select-system.py)
 	if [ -d sysroot/private/var/staged_system_apps ]; then
 		mv sysroot/private/var/staged_system_apps/* sysroot/Applications/
@@ -338,6 +484,26 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		cp ../fw-audio/renoir/adsp.mdt ../fw-audio/renoir/adsp.b0[2-9] ../fw-audio/renoir/adsp.b[1-9][0-9] sysroot/fw-audio-renoir/
 		[ ! -f ../fw-audio/renoir/tfa98xx.cnt ] || cp ../fw-audio/renoir/tfa98xx.cnt sysroot/fw-audio-renoir/
 	fi
+	# the package manager's prefix, when tools/mk-jb.sh has fetched one: the Procursus bootstrap with
+	# Sileo in it, as /jb. It cannot live at /var/jb in the image -- /private/var is a memory
+	# filesystem made afresh at every boot -- so init copies it there (src/init.c, copy_tree).
+	if [ -d ../jb/root/var/jb ]; then
+		rm -rf sysroot/jb
+		cp -a ../jb/root/var/jb sysroot/jb
+		# the applications of the prefix are system applications here: LaunchServices builds its
+		# database afresh at every boot by walking /Applications, which is how their icons appear
+		for app in sysroot/jb/Applications/*.app; do
+			[ -d "$app" ] && cp -a "$app" sysroot/Applications/
+		done
+		# Sileo moves, copies and removes files as root with /bin/mv, /bin/cp, /bin/rm, /bin/mkdir and
+		# /bin/chmod -- where a jailbreak with a writable root keeps them -- and iOS's /bin has df and ps
+		# alone: every one of those spawns failed with nothing said, and the package it had downloaded never
+		# reached apt's archives ("Unable to fetch some archives"). The prefix's own programs, by those names.
+		for c in $SILEO_BIN; do
+			ln -sf /var/jb/usr/bin/$c sysroot/bin/$c
+		done
+		echo "  the package manager's prefix: $(du -sh sysroot/jb | cut -f1) as /jb (init puts it at /var/jb)"
+	fi
 	# our audio device, where the audio server looks for such plug-ins (and for no others: Apple's are left out)
 	mkdir -p sysroot/System/Library/Audio/Plug-Ins/HAL
 	ln -s /redwood/lib/RedwoodAudio.driver sysroot/System/Library/Audio/Plug-Ins/HAL/RedwoodAudio.driver
@@ -349,7 +515,8 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	mkdir -p $D
 	for f in $CACHE/dyld_shared_cache_arm64*; do
 		case "$f" in *.symbols) continue ;; esac     # symbolication data, never mapped
-		ln "$f" $D/
+		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
+		ln -f "$f" $D/
 	done
 	# thousands of small files: 4K blocks for them, the kernel's 16K pages for everything bigger
 	# compressed (read in place by packfs): half the size with LZ4, which is what fits into the phone's RAM;

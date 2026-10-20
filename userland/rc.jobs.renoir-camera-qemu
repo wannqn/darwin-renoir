@@ -1,0 +1,6 @@
+# QEMU/TCG only: wait for SpringBoard after the ringer service appears.
+# With cam=5 cam_fake=1 cam_profile=renoir cam_stream_test=1. No phone MMIO.
+# Camera.app is the only frame reader; do not run camera_test concurrently.
+/redwood/bin/sound_test springboard
+/redwood/bin/rwtouch wait 180 button lock wait 5 swipe 0.5 0.985 0.5 0.3 400 wait 10 tap 0.845 0.36 wait 60
+/redwood/bin/rwtouch tap 0.352 0.067 wait 5 tap 0.5 0.86 wait 20 tap 0.86 0.86 wait 30 tap 0.5 0.86 wait 30

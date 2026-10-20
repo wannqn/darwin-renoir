@@ -165,8 +165,8 @@ commit was missing; unrelated APFS changes remain excluded as requested.
 
 Experimental Renoir cam5 now requires `cam_stream_test=1`. Normal boots without
 that explicit flag still reject it. Only tested main/front sensor indices 1/2
-are admitted by ios_select; usual modes are 7 and 1. Tested gain bounds remain
-conservative: main32..256, front32 (unity only). Other sensors remain unsupported
+are admitted by ios_select; usual modes are 7 and 1. Initial tested gain bounds were
+conservative: main32..256, front32 (unity only); the native descriptor limits below supersede them. Other sensors remain unsupported
 in streaming mode pending gain/write validation.
 
 Lite580 frame-mode capture stalled after a single frame with Redwood's SOF-based
@@ -209,3 +209,7 @@ and linear analog gain. Descriptors now use those native limits, superseding the
 initial conservative32..256 /32-only bring-up limits. The earlier 45-frame
 switching probe exercised the old conservative limits; broader dynamic AE is
 not yet hardware-validated. No OTP or calibration was written.
+
+## 2026-10-20 integration
+
+See [the upstream ledger](upstream-20261020.md). New capture-graph, ISP, shutter, still-image and tuning code is integrated, while real Renoir streaming remains opt-in. Native DW9800 autofocus initialization is now implemented, but has not been tested on the phone. Main and front descriptors use GBRG order from the vendor mode tables and separate Renoir tuning; neither new orientation nor autofocus is hardware-certified. Reader lifetime now drains outstanding copies before freeing capture memory.

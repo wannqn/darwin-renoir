@@ -80,3 +80,8 @@ __pycache__/
 !/xnu-deps/build/lzbitmap/unzbm.c
 !/xnu-deps/build/lzbitmap/libzbitmap.c
 !/xnu-deps/build/lzbitmap/libzbitmap.h
+
+# Optional RAM package-manager/SSH inputs and host shader build outputs
+/jb/
+/ssh/
+/build/

@@ -1,0 +1,37 @@
+[
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.actuator.renoir_ofilm_s5kgw3_dw9800_wide.so",
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.actuator.renoir_ofilm_s5kgw3_dw9800_wide.so",
+    "git_blob": "6a6b9f115c7c685545ff51cb654b21a53f4db207",
+    "sha256": "b31ba97bf3d50efcc3855074f2e26b7b84b705a2d66f94feaafb919273372a25",
+    "bytes": 11408
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.tuned.renoir_ofilm_imx355_ultra.bin",
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.tuned.renoir_ofilm_imx355_ultra.bin",
+    "git_blob": "09ab5e0441e64977d3cc5f71e7d901a1f2b9b9a8",
+    "sha256": "b937b1d02e0228d4fc8e8dfe18518141d00968996656172a5a3a51585b407349",
+    "bytes": 14708971
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.tuned.renoir_ofilm_s5kgw3_wide.bin",
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.tuned.renoir_ofilm_s5kgw3_wide.bin",
+    "git_blob": "820898eb3e93742c97cb2a62936c8d33a5b284d6",
+    "sha256": "cdb78d1335dbe4c884139f489bad0dd8d56f1382973f22036e069b532dd25641",
+    "bytes": 23882861
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.tuned.renoir_sunny_s5k3t2_front.bin",
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.tuned.renoir_sunny_s5k3t2_front.bin",
+    "git_blob": "3b0ce28c816a2d11dec801815ee2f2dd2be74579",
+    "sha256": "daf7cce6e51253779cf7401e333abc495c97315114b8aa4a23c372971ae3c81d",
+    "bytes": 5495989
+  },
+  {
+    "path": "proprietary/vendor/lib64/camera/com.qti.tuned.renoir_sunny_s5k5e9yx04_macro.bin",
+    "url": "https://raw.githubusercontent.com/TheMuppets/proprietary_vendor_xiaomi_renoir/lineage-23.2/proprietary/vendor/lib64/camera/com.qti.tuned.renoir_sunny_s5k5e9yx04_macro.bin",
+    "git_blob": "7ea8e0abc97f1c713c8e410a0356b514af104ed4",
+    "sha256": "6ac58d3c1a1d4633218f0f08a94c35e2a11e52b638b1f136bfe5eb04d8b3b3d9",
+    "bytes": 2289931
+  }
+]
