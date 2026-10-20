@@ -6,16 +6,17 @@ set -e
 cd "$(dirname "$(readlink -f "$0")")/.."
 # KERNEL=... to take the kernel from a tree built elsewhere (xnu/apply.sh makes one anywhere)
 K=${KERNEL:-xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837}
+# SKIP_UEFI=1 refreshes source-built kernel/userland without replacing board UEFI.
 MU=Mu-Silicium
 mkdir -p prebuilt/userland prebuilt/uefi
 cp $K prebuilt/mach.development.bcm2837
 cp xnuloader/loader.efi prebuilt/loader.efi
 cp userland/hello prebuilt/userland/
 for f in init child stage0 hello_dyn svc_test surf_test rwtouch mg_test cpu_test sound_test libredwood.dylib libredwood-sb.dylib \
-	libredwood-media.dylib libredwood-app.dylib libredwood-tweaks.dylib RedwoodAudio net_test; do
+	libredwood-media.dylib libredwood-statusbar.dylib libredwood-app.dylib libredwood-tweaks.dylib RedwoodAudio net_test; do
 	cp userland/obj/$f prebuilt/userland/
 done
-if [ -f $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ]; then
+if [ "${SKIP_UEFI:-0}" != 1 ] && [ -f $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ]; then
 	cp $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd $MU/BootShim/BootShim.bin $MU/Resources/DTBs/redwood.dtb \
 		$MU/Resources/ramdisk $MU/Resources/Scripts/mkbootimg.py prebuilt/uefi/
 fi
