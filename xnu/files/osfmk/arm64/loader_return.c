@@ -12,6 +12,8 @@
  * Only valid while the kernel does not drive hardware that UEFI also uses.
  */
 #include <mach/mach_types.h>
+#include <stdarg.h>
+extern int vsnprintf(char *, size_t, const char *, va_list);
 #include <machine/atomic.h>
 #include <kern/cpu_number.h>
 #include <kern/debug.h>
@@ -354,6 +356,26 @@ loader_log_append_msgbuf(void)
 			}
 		}
 	}
+}
+
+/* First panic only, before debugger rendezvous and panic-buffer creation.
+ * No console/debugger lock: diagnostics must survive a failed SMP handoff. */
+void
+loader_note_panic(const char *format, va_list *args, uintptr_t caller)
+{
+    static bool noted;
+    static char message[1024];
+    if (format == NULL || args == NULL || !os_atomic_cmpxchg(&noted, false, true, relaxed)) return;
+    va_list copy;
+    va_copy(copy, *args);
+    vsnprintf(message, sizeof(message), format, copy);
+    va_end(copy);
+    loader_log_puts("\nEARLY PANIC: ");
+    loader_log_puts(message);
+    loader_log_puts("\npanic caller 0x");
+    for (int shift = 60; shift >= 0; shift -= 4)
+        loader_log_putc("0123456789abcdef"[(caller >> shift) & 15]);
+    loader_log_putc('\n');
 }
 
 void

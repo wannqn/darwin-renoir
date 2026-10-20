@@ -1919,6 +1919,25 @@ index e26a1d7..f91095c 100644
  
  #if APPLE_ARM64_ARCH_FAMILY
  	configure_late_apple_regs();
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+index 18ef2f0..41315bf 100644
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -62,7 +62,14 @@
+ 
+ extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+ 
++/* Generic ARM phones map independent GPU, PCIe/MHI, DSP and camera blocks.
++ * Reserve enough VA for their permanent MMIO mappings; physical pages are
++ * not allocated by enlarging this submap. Keep Apple's platform default. */
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++#define IO_MAP_SIZE            (64ul << 20)
++#else
+ #define IO_MAP_SIZE            (8ul << 20)
++#endif
+ 
+ __startup_data static struct mach_vm_range io_range;
+ static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
 diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
 index 39daaf8..64ceb1a 100644
 --- a/osfmk/arm/model_dep.c
@@ -2654,10 +2673,26 @@ index 384118e..2573d2e 100644
  				 * io_map doesn't support.  However this buffer is set up
  				 * by the bootloader and doesn't require D$ cleaning, so
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
-index 0a00656..bfad3cb 100644
+index 0a00656..f7e48bc 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1147,9 +1147,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1063,11 +1063,15 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
+ 
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wmissing-noreturn"
++extern void loader_note_panic(const char *, va_list *, uintptr_t);
++
+ void
+ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,
+     uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
+ {
+ #pragma clang diagnostic pop
++	loader_note_panic(panic_format_str, panic_args, panic_caller);
++
+ 
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+@@ -1147,9 +1151,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  	__builtin_unreachable();
  }
  
@@ -2670,7 +2705,7 @@ index 0a00656..bfad3cb 100644
  	for (;;) {
  #if defined(__arm__) || defined(__arm64__)
  		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
-@@ -1163,6 +1166,7 @@ panic_spin_forever(void)
+@@ -1163,6 +1170,7 @@ panic_spin_forever(void)
  static void
  kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
  {
