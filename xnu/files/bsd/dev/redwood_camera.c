@@ -1870,7 +1870,6 @@ static uint32_t renoir_arc_old[2], renoir_arc_vote[2];
 static bool
 renoir_camera_rails(bool on)
 {
-    if (camera_renoir) return renoir_camera_rails(on);
     uint32_t address[2];
     if (on && (renoir_arc_changed[0] || renoir_arc_changed[1])) return false;
     int position[2]={rail_position("cx.lvl",CX_LEVEL,&address[0]),
@@ -4096,6 +4095,21 @@ camdev_close(__unused dev_t dev, __unused int flags, __unused int type, __unused
 	return 0;
 }
 
+/* Caller holds ios_lock. A draining ring is unreadable, but the read still
+ * has to request the next session: ring_alloc clears ios_stopping only after
+ * serve_ios has received ios_wanted. Checking the drain flag first deadlocks
+ * every reopen/sensor switch after the first session. */
+static int
+camdev_read_prepare(void)
+{
+    if (broken) return EIO;
+    if (!ios_streaming && !ios_wanted) {
+        ios_wanted = true;
+        wakeup(&ios_open);
+    }
+    return ios_stopping ? EAGAIN : 0;
+}
+
 static int
 camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 {
@@ -4110,11 +4124,11 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		wakeup(&ios_open);
 	}
 	for (;;) {
-		if (ios_stopping) { lck_mtx_unlock(&ios_lock); return EAGAIN; }
-		if (broken) {
-			lck_mtx_unlock(&ios_lock);
-			return EIO;
-		}
+        int admission = camdev_read_prepare();
+        if (admission != 0) {
+            lck_mtx_unlock(&ios_lock);
+            return admission;
+        }
 		b = -1;
 		for (int i = 0; i < RING; i++) {
 			if (place[i].state == PLACE_READY && place[i].sequence > ios_given && (b < 0 || place[i].sequence > place[b].sequence)) {
@@ -4127,10 +4141,6 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		if (ios_ms() - since > (ios_streaming ? 3000u : 15000u)) {      /* (the sensor's tables take seconds) */
 			lck_mtx_unlock(&ios_lock);
 			return EAGAIN;
-		}
-		if (!ios_streaming && !ios_wanted) {
-			ios_wanted = true;      /* (the frames stopped meanwhile: another sensor) */
-			wakeup(&ios_open);
 		}
 		struct timespec ts = { 0, 100 * NSEC_PER_MSEC };
 		error = msleep(&ios_frames_done, &ios_lock, PZERO | PCATCH, "redwood-camera", &ts);
