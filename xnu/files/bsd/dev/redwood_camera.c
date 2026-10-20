@@ -244,6 +244,9 @@ static const struct sensor_hw redwood_sensors[] = {
 };
 /* Renoir live DT + its vendor sensor modules. cam=3/4 use the shima
  * CSIPHY1.2.4/CSID580/IFE580 backend; cam=5 awaits streaming/gain validation. */
+/* Installed Android sensor libraries: gain register = floor(real_gain * 32),
+ * wide clamps at 64x (2048), front at 16x (512). GetSensorLibraryAPIs
+ * selects their CalculateExposure implementations (local audit in docs). */
 static const struct sensor_hw renoir_sensors[] = {
     { .name = "macro (S5K5E9YX04)", .tab = "camera-renoir-s5k5e9yx04.tab",
       .bus_name = "CCI 1 master 0", .sda = 111, .scl = 112, .reset = 116,
@@ -255,12 +258,12 @@ static const struct sensor_hw renoir_sensors[] = {
       .mclk_cmd = 0xe01c, .mclk_cbcr = 0xe034, .mclk_pin = 101,
       .vana = { SUPPLY_LDO, 6, 2800, 0, 0 }, .vdig = { SUPPLY_LDO, 1, 1056, 0, 0 },
       .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .vaf = { SUPPLY_LDO, 3, 2800, 0, 0 },
-      .csiphy = 1, .timer_cmd = 0xe0c8, .timer_cbcr = 0xe0e0, .phy_cbcr = 0xe0e4, .regs = REGS_SMIA, .chip = "S5KGW3" },
+      .csiphy = 1, .timer_cmd = 0xe0c8, .timer_cbcr = 0xe0e0, .phy_cbcr = 0xe0e4, .regs = REGS_SMIA, .chip = "S5KGW3", .gain_unity = 32, .gain_max = 2048 },
     { .name = "front (S5K3T2)", .tab = "camera-renoir-s5k3t2.tab",
       .bus_name = "CCI 0 master 0", .sda = 107, .scl = 108, .reset = 126,
       .mclk_cmd = 0xe000, .mclk_cbcr = 0xe018, .mclk_pin = 100,
       .vana = { SUPPLY_GPIO, 0, 2800, 176, 135 }, .vdig = { SUPPLY_GPIO, 0, 1050, 177, 135 },
-      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 5, .timer_cmd = 0xe14c, .timer_cbcr = 0xe164, .phy_cbcr = 0xe168, .regs = REGS_SMIA, .chip = "S5K3T2" },
+      .vio = { SUPPLY_LDO, 5, 1800, 0, 0 }, .csiphy = 5, .timer_cmd = 0xe14c, .timer_cbcr = 0xe164, .phy_cbcr = 0xe168, .regs = REGS_SMIA, .chip = "S5K3T2", .gain_unity = 32, .gain_max = 512 },
     { .name = "ultra-wide (IMX355)", .tab = "camera-renoir-imx355.tab",
       .bus_name = "CCI 1 master 1", .sda = 113, .scl = 114, .reset = 119,
       .mclk_cmd = 0xe038, .mclk_cbcr = 0xe050, .mclk_pin = 102,
@@ -297,11 +300,23 @@ find_pins(void)
 	pins_found = true;
 }
 
+/* Shima msm_pinmux_set_mux preserves extended GPIO ownership and enables it
+ * when hardware advertises EGPIO_PRESENT. Restore paths use saved CFG verbatim. */
+static uint32_t
+pin_config(unsigned pin, uint32_t config)
+{
+    if (!camera_renoir) return config;
+    uint32_t old = rd(GPIO_CFG(pin));
+    config |= old & ~0x3ffu;
+    if (old & (1u << 11)) config |= 1u << 12;
+    return config;
+}
+
 static void
 reset_pin(bool high)
 {
 	wr(GPIO_IO(hw->reset), high ? 2 : 0);
-	wr(GPIO_CFG(hw->reset), CFG_OUTPUT | CFG_DRIVE_MA(2));         /* GPIO, no pull, 2 mA: Android's cam_sensor_active_* */
+	wr(GPIO_CFG(hw->reset), pin_config(hw->reset, CFG_OUTPUT | CFG_DRIVE_MA(2)));         /* GPIO, no pull, 2 mA: Android's cam_sensor_active_* */
 }
 
 /* ---- I2C by hand (as in redwood_haptic.c) ---------------------------------------------------------- */
@@ -324,7 +339,7 @@ static void
 line(unsigned pin, bool high)
 {
 	wr(GPIO_IO(pin), 0);
-	wr(GPIO_CFG(pin), CFG_PULL_UP | (high ? 0 : CFG_OUTPUT));
+	wr(GPIO_CFG(pin), pin_config(pin, CFG_PULL_UP | (high ? 0 : CFG_OUTPUT)));
 }
 
 static bool
@@ -988,7 +1003,7 @@ mclk_on(uint32_t khz)
 		give_up("a clock that does not come on");
 		return false;
 	}
-	wr(GPIO_CFG(hw->mclk_pin), CFG_FUNCTION(1) | CFG_DRIVE_MA(4));    /* cam_mclk, no pull, 4 mA: cam_macro_mclk_active, cam_wide_mclk_active */
+	wr(GPIO_CFG(hw->mclk_pin), pin_config(hw->mclk_pin, CFG_FUNCTION(1) | CFG_DRIVE_MA(4)));    /* cam_mclk, no pull, 4 mA: cam_macro_mclk_active, cam_wide_mclk_active */
 	say("camera: MCLK on at %u.%u MHz (RCG cfg %#x, branch %#x)\n", khz / 1000, khz % 1000 / 100, rd(camcc + MCLK_CFG_RCGR),
 	    rd(camcc + MCLK_CBCR));
 	return true;
@@ -1160,13 +1175,13 @@ supply_on(const struct supply *s)
         gpio_supplies[slot].io = rd(GPIO_IO(s->gpio));
         gpio_supplies[slot].changed = true;
 		wr(GPIO_IO(s->gpio), 2);
-		wr(GPIO_CFG(s->gpio), CFG_OUTPUT | CFG_DRIVE_MA(2));
+		wr(GPIO_CFG(s->gpio), pin_config(s->gpio, CFG_OUTPUT | CFG_DRIVE_MA(2)));
 		if ((rd(GPIO_CFG(s->gpio)) & 0x3ff) != (CFG_OUTPUT | CFG_DRIVE_MA(2)) || !(rd(GPIO_IO(s->gpio)) & 2)) {
 			give_up("a supply's pin that does not read back");
 			return false;
 		}
 		spin_us(s->ramp_us);
-		say("camera: gpio%u high: the fixed %u.%u V regulator on\n", s->gpio, s->mv / 1000, s->mv % 1000 / 100);
+		say("camera: gpio%u high: the fixed %u.%u V regulator on (CFG %#x -> %#x, IO %#x)\n", s->gpio, s->mv / 1000, s->mv % 1000 / 100, gpio_supplies[slot].cfg, rd(GPIO_CFG(s->gpio)), rd(GPIO_IO(s->gpio)));
 		return true;
 	}
 	give_up("a supply this sensor does not have");
@@ -2543,12 +2558,12 @@ tpg_start(void)
 
 /* cam_vfe_top_reset(), cam_vfe_bus_init_hw(), cam_vfe_bus_start_wm() and update_wm() for RDI 0 in frame mode. */
 static bool
-ife_config(uint64_t address, uint32_t frame_bytes, uint32_t frame_inc)
+ife_config(uint64_t address, uint32_t frame_bytes, uint32_t frame_inc, uint32_t stride)
 {
     if (camera_renoir) {
         struct rcam_io io = rcam_bus(ife);
         ife_running = true; /* all partial configuration is quiesced on error */
-        if (!rcam_ife_start(&io, address, frame_bytes, frame_inc)) {
+        if (!rcam_ife_start(&io, address, frame_bytes, frame_inc, stride)) {
             give_up("Renoir IFE580 reset or bus-v3 setup failed");
             return false;
         }
@@ -2675,7 +2690,7 @@ capture_tpg(void)
 	struct cam_header *h;
 
 	if (!frames_alloc(width, height, stride, 0) || !titan_up() || !smmu_up() || !csid_reset() ||
-	    !csid_config(-1, 4, 0x3210, TPG_VC, width, height, false) || !ife_config(FRAME_ADDRESSES + CAM_HEADER_BYTES, stride * height, stride * height)) {
+	    !csid_config(-1, 4, 0x3210, TPG_VC, width, height, false) || !ife_config(FRAME_ADDRESSES + CAM_HEADER_BYTES, stride * height, stride * height, stride)) {
 		titan_down();
 		return;
 	}
@@ -2999,7 +3014,7 @@ exposure(const struct ctab_mode *mode)
 	if (shutter == 0 && gain == 0 && vblank == 0) {
 		return true;
 	}
-	if (hw->regs != REGS_OV_PAGED && hw != &sensors[1]) {
+	if (hw->regs != REGS_OV_PAGED && hw != &sensors[1] && !(camera_renoir && hw == &sensors[2])) {
 		say("camera: cam_shutter, cam_gain and cam_vblank are for the macro and the wide camera: the %s one's exposure is "
 		    "its tables'\n", hw->name);
 		return true;
@@ -3074,7 +3089,7 @@ capture_sensor(void)
 	if (!power_up() || !healthy() || !read_chip_id() || !sensor_table("init") || !sensor_table(res) || !healthy() ||
 	    !titan_up() || !smmu_up() || !csid_reset() ||
 	    !csid_config((int)hw->csiphy, mode->lanes, ctab->lane_assign & ((1u << (4 * mode->lanes)) - 1), 0, width, height,
-	    mode->cphy != 0) || !ife_config(FRAME_ADDRESSES + CAM_HEADER_BYTES, stride * height, stride * height) ||
+	    mode->cphy != 0) || !ife_config(FRAME_ADDRESSES + CAM_HEADER_BYTES, stride * height, stride * height, stride) ||
 	    !csiphy_up(mode->lanes, mode->cphy != 0, ctab->lane_assign, settle, rate)) {
 		csiphy_down();
 		titan_down();
@@ -3099,6 +3114,14 @@ capture_sensor(void)
 	}
 	h->bayer = pattern ? hw->pattern_bayer : hw->bayer;
 	if ((pattern == 0 || sensor_table("tpgon")) && sensor_table("on") && exposure(mode)) {
+        if (camera_renoir && hw->regs == REGS_SMIA) {
+            static const uint16_t registers[] = {0x0000,0xfcfc,0x0100,0x0104,0x0112,0x0202,0x0204,0x020e,0x0210,0x0340,0x0600};
+            for (unsigned i=0;i<sizeof(registers)/sizeof(registers[0]);i++) {
+                uint16_t a=registers[i];uint8_t addr[2]={a>>8,a&255},v[2]={0};
+                bool ok=i2c_transfer(&cci_bus,sensor_address(),addr,2,v,2);
+                say("camera: sensor readback %#06x = %#06x (%s)\n",a,((unsigned)v[0]<<8)|v[1],ok?"ACK":"NACK");
+            }
+        }
 		/* frames one after the other into the two places, the last of `wanted' kept (the first ones come before the exposure) */
 		for (unsigned ms = 0, done = 0; ms < 5000 && done < wanted; ms += 2) {
 			sensor_delay(2000);
@@ -3347,7 +3370,7 @@ ios_start(void)
 		/* the CSID's colour bars in the mode's size, as cam=3 makes them: no sensor, no CSIPHY */
 		if (!titan_up() || !smmu_up() || !csid_reset() ||
 		    !csid_config(-1, 4, 0x3210, TPG_VC, ios_mode->width, ios_mode->height, false) ||
-		    !ife_config(FRAME_ADDRESSES, ring_frame_bytes, 0) || !tpg_start()) {
+		    !ife_config(FRAME_ADDRESSES, ring_frame_bytes, camera_renoir ? ring_frame_bytes : 0, RAW10_STRIDE(ios_mode->width)) || !tpg_start()) {
 			return false;
 		}
 		lck_mtx_lock(&ios_lock);
@@ -3366,7 +3389,7 @@ ios_start(void)
 	if (!power_up() || !healthy() || !read_chip_id() || !sensor_table("init") || !sensor_table(ios_res()) || !healthy() ||
 	    !titan_up() || !smmu_up() || !csid_reset() ||
 	    !csid_config((int)hw->csiphy, ios_mode->lanes, ctab->lane_assign & ((1u << (4 * ios_mode->lanes)) - 1), 0, ios_mode->width,
-	    ios_mode->height, ios_mode->cphy != 0) || !ife_config(FRAME_ADDRESSES, ring_frame_bytes, 0) ||
+	    ios_mode->height, ios_mode->cphy != 0) || !ife_config(FRAME_ADDRESSES, ring_frame_bytes, camera_renoir ? ring_frame_bytes : 0, RAW10_STRIDE(ios_mode->width)) ||
 	    !csiphy_up(ios_mode->lanes, ios_mode->cphy != 0, ctab->lane_assign, ios_mode->settle,
 	    (uint64_t)ios_mode->pixel_clock * 10 / ios_mode->lanes)) {
 		return false;
@@ -3395,6 +3418,20 @@ ios_start(void)
 	say("camera: the frames for iOS: mode %u, %ux%u, %u lines of %u ns a frame at the shortest; exposure %u lines, gain %#x, "
 	    "frame %u lines\n", ios_mode_n, ios_mode->width, ios_mode->height, ios_mode->frame_length, ios_line_ns, lines, gain, frame_lines);
 	return true;
+}
+
+/* Caller holds ios_lock. The current completed slot stays available to readers;
+ * a slot already being copied to userland must never become the DMA target. */
+static int
+ring_next_place(int writing)
+{
+    int target = -1;
+    for (int i = 1; i < RING; i++) {
+        int c = (writing + i) % RING;
+        if (place[c].state != PLACE_READING &&
+            (target < 0 || place[c].sequence < place[target].sequence)) target = c;
+    }
+    return target;
 }
 
 static void
@@ -3460,7 +3497,21 @@ ios_session(void)
 			place[writing].gain = ios_now.gain;
 			place[writing].frame_lines = ios_now.frame_lines;
 		}
-		if (top & RDI0_SOF) {
+        if (camera_renoir && (bus & WM0_DONE)) {
+            /* Lite580 frame-mode WM needs a fresh address/update for each frame,
+             * as in bounded RAW capture. Never hand a READING slot to DMA. */
+            int target = ring_next_place(writing);
+            if (target >= 0) {
+                writing = target;
+                place[writing].state = PLACE_WRITING;
+                blk_put(ife, "IFE", WM0_IMAGE_ADDR,
+                    (uint32_t)(FRAME_ADDRESSES + (uint64_t)writing * ring_place_bytes), false);
+                blk_put(ife, "IFE", IFE_REG_UPDATE, IFE_RDI_UPDATE, false);
+            } else {
+                give_up("no free frame slot for the write master");
+            }
+        }
+        if (!camera_renoir && (top & RDI0_SOF)) {
 			if (next >= 0) {
 				writing = next;         /* (the address given at the last SOF, taken at this one) */
 				next = -1;
@@ -3751,6 +3802,10 @@ camdev_make(void)
 static bool
 ios_select(unsigned index, uint32_t mode_n)
 {
+    if (camera_renoir) {
+        if (index != 1 && index != 2) return false;
+        if (mode_n == ~0u) mode_n = index == 1 ? 7 : 1;
+    }
 	select_sensor(index);
 	find_pins();
 	if (!ctab_load()) {
@@ -3898,13 +3953,16 @@ camera_thread(__unused void *parameter, __unused wait_result_t result)
 	if (level == 5) {
 		camdev_make();
 	}
+	say("camera: worker entered, delay %u s, level %u, board %s\n", secs, level, camera_renoir ? "renoir" : "redwood");
 	wait_ms(secs * 1000);           /* (the system up first: nothing else is on these buses then) */
+	say("camera: worker mapping register windows\n");
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
 	gcc = ml_io_map(GCC_PHYS, 0x30000);
 	camcc = ml_io_map(CAMCC_PHYS, CAMCC_SIZE);
 	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
 	arb_cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
 	arb_observer = ml_io_map(ARB_OBSERVER_PHYS, ARB_OBSERVER_SIZE);
+	say("camera: register windows mapped\n");
 	select_sensor(level == 5 ? 1 : 0);
 	if (PE_parse_boot_arg_str("cam_sensor", which, sizeof(which))) {
 		for (unsigned i = 0; i < SENSOR_COUNT; i++) {
@@ -3956,8 +4014,10 @@ redwood_camera_init(void)
 		return;
 	}
     if (camera_renoir) {
-        if (level > 4) {
-            say("camera: Renoir cam=5 is pending streaming/gain validation; use cam=3/4 bring-up\n");
+        uint32_t stream_test = 0;
+        (void)PE_parse_boot_argn("cam_stream_test", &stream_test, sizeof(stream_test));
+        if (level > 5 || (level == 5 && stream_test != 1)) {
+            say("camera: Renoir cam=5 requires cam_stream_test=1 during streaming validation\n");
             level = 0;
             return;
         }
@@ -3965,6 +4025,7 @@ redwood_camera_init(void)
         pmic_bus.sda = PIN_PMIC_SDA;
         pmic_bus.scl = PIN_PMIC_SCL;
     }
+    say("camera: init accepted board %s, cam=%u\n", camera_renoir ? "renoir" : "redwood", level);
     level = level > 5 ? 5 : level;
 	if (level >= 3) {
 		/*

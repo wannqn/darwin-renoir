@@ -699,9 +699,9 @@ space_on(void)
 		third[(AUDIO_ADDRESSES >> 12 & 0x1ff) + page] = kvtophys(buffer + 4096 * page) | AUDIO_PTE;
 	}
 	for (vm_offset_t line = space.tables; line < space.tables + 3 * 4096; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 	table_root = kvtophys(space.tables) | (uint64_t)space.context << 48;
 	say("sound: THE SMMU IS ABOUT TO BE WRITTEN: context %u gets page tables of ours (root %#llx) for the %u KB of the periods and the microphones' "
 	    "at %#llx, and match register %u sends stream %#x through it\n", space.context, table_root & PTE_ADDRESS,
@@ -1010,9 +1010,9 @@ period_fill(unsigned period, bool silent)
 	}
     if(sound_renoir && level>=3)renoir_tfa_scale_pcm(samples,PERIOD_FRAMES);
 	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + PERIOD_BYTES; line += 64) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (line));        /* the DSP reads memory, not our caches */
+		__asm__ volatile ("dc cvac, %0" : : "r" (line) : "memory");        /* the DSP reads memory, not our caches */
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 static bool
@@ -1135,7 +1135,9 @@ static volatile uint32_t ios_peak;              /* the largest sample since the 
 static uint32_t
 ios_sink(const int16_t *frames, uint32_t count)
 {
-	uint32_t head = ring_head, room = RING_FRAMES - (head - ring_tail), taken = count < room ? count : room;
+	uint32_t head = __atomic_load_n(&ring_head,__ATOMIC_RELAXED);
+	uint32_t tail = __atomic_load_n(&ring_tail,__ATOMIC_ACQUIRE);
+	uint32_t room = RING_FRAMES - (head - tail), taken = count < room ? count : room;
 	bool sound = false;
 
 	for (uint32_t i = 0; i < taken; i++) {
@@ -1150,7 +1152,7 @@ ios_sink(const int16_t *frames, uint32_t count)
 		}
 	}
 	OSMemoryBarrier();
-	ring_head = head + taken;
+	__atomic_store_n(&ring_head,head+taken,__ATOMIC_RELEASE);
 	ios_frames += taken;
 	if (sound) {
 		last_sound_us = now_us();
@@ -1195,7 +1197,9 @@ static void
 period_fill_ios(unsigned period)
 {
 	int16_t *samples = (int16_t *)(buffer + 4096 * period);
-	uint32_t tail = ring_tail, available = ring_head - tail, n = available < PERIOD_FRAMES ? available : PERIOD_FRAMES;
+	uint32_t tail = __atomic_load_n(&ring_tail,__ATOMIC_RELAXED);
+	uint32_t head = __atomic_load_n(&ring_head,__ATOMIC_ACQUIRE);
+	uint32_t available = head-tail, n = available < PERIOD_FRAMES ? available : PERIOD_FRAMES;
 
 	OSMemoryBarrier();
 	for (uint32_t i = 0; i < n; i++) {
@@ -1204,7 +1208,7 @@ period_fill_ios(unsigned period)
 	}
 	bzero(samples + 2 * n, (PERIOD_FRAMES - n) * 4);
 	OSMemoryBarrier();
-	ring_tail = tail + n;
+	__atomic_store_n(&ring_tail,tail+n,__ATOMIC_RELEASE);
 	fed_frames += n;
 	silent_frames += PERIOD_FRAMES - n;
 	/* the guard, on every period, silence too: its filter and its averages go on (redwood_guard.c) */
@@ -1215,9 +1219,9 @@ period_fill_ios(unsigned period)
 	guard_periods++;
     if(sound_renoir && level>=3)renoir_tfa_scale_pcm(samples,PERIOD_FRAMES);
 	for (vm_offset_t line = (vm_offset_t)samples; line < (vm_offset_t)samples + PERIOD_BYTES; line += 64) {
-		__asm__ volatile ("dc cvac, %0" : : "r" (line));
+		__asm__ volatile ("dc cvac, %0" : : "r" (line) : "memory");
 	}
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 static void
@@ -1547,6 +1551,8 @@ redwood_sound_dsp_up(void)
 	if (level > 4) {
 		level = 4;
 	}
+	/* Renoir browser audio already reaches full scale: avoid default pre-limiter gain. */
+	if(sound_renoir) {below=160;gain=0;}
 	PE_parse_boot_argn("sound_secs", &seconds, sizeof(seconds));
 	PE_parse_boot_argn("sound_below", &below, sizeof(below));
 	PE_parse_boot_argn("sound_pause", &pause_ms, sizeof(pause_ms));
@@ -1555,7 +1561,7 @@ redwood_sound_dsp_up(void)
 	if (gain > REDWOOD_GUARD_MAX_GAIN) {
 		gain = REDWOOD_GUARD_MAX_GAIN;
 	}
-    if(sound_renoir) {gain=0;if(below<240)below=240;}
+    if(sound_renoir && below<160)below=160;
 	redwood_guard_configure(true, gain);
 	if (level >= 2 && level <= 3 && seconds > 3) {
 		seconds = 3;            /* the test tone: three seconds at most */

@@ -208,7 +208,7 @@ now_us(void)
 static void
 settle(void)
 {
-	__asm__ volatile ("dsb sy");
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 static bool

@@ -16,7 +16,7 @@ code=r'''#include <stdbool.h>
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
-static uint32_t level, asked;
+static uint32_t level, asked, stream_test;
 static bool camera_renoir;
 static const char *board;
 static unsigned threads, allocations;
@@ -34,7 +34,7 @@ typedef int thread_t;
 #define VM_KERN_MEMORY_IOKIT 0
 static int kernel_map;
 static bool redwood_board_is(const char *s){return strcmp(s,board)==0;}
-static bool PE_parse_boot_argn(const char *s,void *p,size_t n){(void)n;if(strcmp(s,"cam")==0){*(uint32_t*)p=asked;return true;}return false;}
+static bool PE_parse_boot_argn(const char *s,void *p,size_t n){(void)n;if(strcmp(s,"cam_stream_test")==0){*(uint32_t*)p=stream_test;return true;}if(strcmp(s,"cam")==0){*(uint32_t*)p=asked;return true;}return false;}
 static int say(const char *s,...){(void)s;return 0;}
 static void camera_thread(void){}
 static int kernel_thread_start(void(*f)(void),void*p,thread_t*t){(void)f;(void)p;*t=1;threads++;return 0;}
@@ -56,6 +56,9 @@ int main(void){
  board="redwood";asked=5;redwood_camera_init();assert(threads==5 && allocations==3);
  /* the default pointer still refers to valid Redwood data before a selection */
  assert(hw==redwood_sensors);
+ board="renoir";asked=5;stream_test=1;redwood_camera_init();assert(level==5 && threads==6 && allocations==4);
+ assert(sensors[1].gain_unity==32 && sensors[1].gain_max==2048);
+ assert(sensors[2].gain_unity==32 && sensors[2].gain_max==512);
  puts("Camera board: Renoir probe admission, cam3/4 admission and cam5 rejection before allocation, isolated tables and unknown-board guard passed");
 }
 '''

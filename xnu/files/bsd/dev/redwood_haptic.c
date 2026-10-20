@@ -974,9 +974,13 @@ haptic_thread(__unused void *parameter, __unused wait_result_t result)
 	thread_terminate(current_thread());
 }
 
+extern void renoir_haptic_init(void);
+extern void renoir_haptic_quiesce(void);
+
 void
 redwood_haptic_init(void)
 {
+	if (redwood_board_is("renoir")) {renoir_haptic_init();return;}
 	/* Board wiring and firmware below are Redwood-specific. */
 	if (!redwood_board_is("redwood")) return;
 	thread_t thread;
@@ -996,6 +1000,7 @@ redwood_haptic_init(void)
 void
 redwood_haptic_quiesce(void)
 {
+	if (redwood_board_is("renoir")) {renoir_haptic_quiesce();return;}
 	if (released && tlmm != 0) {
 		leaving = true;
 		reset_pin(false);

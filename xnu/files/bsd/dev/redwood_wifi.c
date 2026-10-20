@@ -5150,3 +5150,38 @@ renoir_wifi_stop(void)
 	if (renoir_session_running) { tell("renoir-wifi: session did not finish before loader quiesce\n"); }
 	redwood_apple80211_summary();
 }
+
+/* Read the existing external haptic supply; never vote on this shared display rail. */
+bool redwood_renoir_haptic_supply(uint32_t *millivolts,bool *enabled) {
+ uint32_t mv,on;
+ if(!redwood_board_is("renoir") || !millivolts || !enabled ||
+    !renoir_rpmh_read("bobc1",0,&mv) || !renoir_rpmh_read("bobc1",4,&on))return false;
+ *millivolts=mv&8191u;*enabled=(on&1)!=0;return true;
+}
+
+/* Haptics owns only this APPS vote. Other BOB clients (including the display) keep theirs. */
+static uint32_t renoir_haptic_bob_saved[3];
+static bool renoir_haptic_bob_changed;
+bool redwood_renoir_haptic_supply_vote(bool on) {
+ if(!redwood_board_is("renoir"))return false;
+ if(!on) {
+  if(!renoir_haptic_bob_changed)return true;
+  bool ok=renoir_vrm_set("bobc1",renoir_haptic_bob_saved[0],renoir_haptic_bob_saved[1],renoir_haptic_bob_saved[2]);
+  for(unsigned i=0;i<3 && ok;i++){uint32_t v;ok=renoir_rpmh_read("bobc1",4*i,&v) && (v&(i==0?8191u:i==1?1u:7u))==renoir_haptic_bob_saved[i];}
+  if(ok)renoir_haptic_bob_changed=false;return ok;
+ }
+ if(renoir_haptic_bob_changed)return false;
+ for(unsigned i=0;i<3;i++) {
+  uint32_t v;if(!renoir_rpmh_read("bobc1",4*i,&v))return false;
+  renoir_haptic_bob_saved[i]=v&(i==0?8191u:i==1?1u:7u);
+ }
+ if(renoir_haptic_bob_saved[0]>3960)return false;
+ uint32_t mv=renoir_haptic_bob_saved[0]>3296?renoir_haptic_bob_saved[0]:3296;
+ uint32_t mode=renoir_haptic_bob_saved[2]>6?renoir_haptic_bob_saved[2]:6; /* PMIC5 BOB AUTO, not LDO mode */
+ renoir_haptic_bob_changed=true; /* A timed-out write may still have reached VRM. */
+ bool ok=renoir_vrm_set("bobc1",mv,1,mode);
+ uint32_t v,e;
+ ok=ok && renoir_rpmh_read("bobc1",0,&v) && renoir_rpmh_read("bobc1",4,&e) && (v&8191)==mv && (e&1);
+ if(!ok)(void)redwood_renoir_haptic_supply_vote(false);
+ return ok;
+}

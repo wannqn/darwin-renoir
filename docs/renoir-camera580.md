@@ -1,8 +1,8 @@
 # Renoir CSID580 / IFE-lite580 RAW capture
 
-Implemented in redwood_camera.c and portable renoir_camera_core.h. Hardware has NOT
-been exercised yet: the user is away. This is an implementation ready for staged
-bring-up, not a claim that real sensor frames or iOS Camera already work.
+Implemented in redwood_camera.c and portable renoir_camera_core.h. Real Renoir
+hardware bring-up now receives recognizable S5KGW3 RAW frames. iOS Camera preview
+and photo capture are still disabled pending streaming/exposure validation.
 
 ## Primary source audit
 
@@ -48,8 +48,9 @@ live Renoir Android DTB/DTS were used. Relevant files:
 ## Available modes and payloads
 
 Default normal iOS has cameras off and no automatic audio tests. All prepared
-payloads retain loader_return_after=0 and RAM packfs boot. No phone operations
-or partition writes were performed.
+normal payloads retain loader_return_after=0 and RAM packfs boot. Diagnostic
+phone runs below use an isolated RAM root with a temporary return timer. No
+partition writes were performed.
 
 | Local logs/ payload | Mode |
 | --- | --- |
@@ -96,3 +97,115 @@ Do not remove that guard merely because host tests or QEMU pass.
    sensor gain/exposure/AF backend and enable continuous iOS streaming after testing.
 
 Use fastboot boot only. Do not flash, erase, repartition or adopt APFS for this work.
+
+## Hardware bring-up, 2026-10-19
+
+- Installed Android vendor module SHA256 values match all four manifest entries.
+- cam=2 identifies main S5KGW3 (0x7309), macro S5K5E9YX04 (0x559b), and ultra
+  IMX355 (0x0355). Front S5K3T2 now identifies as 0x3142 after the EGPIO fix below.
+- Corrected bus-v3 WM image_cfg_1 (horizontal initial offset: zero) and
+  image_cfg_2 (DMA row stride). The old configuration produced SMMU overruns.
+  RAW10 stride stays aligned to 16 bytes; frame increment is retained.
+- After correction, main and macro bounded RAW captures finish without observed
+  SMMU/CCIF/overflow faults and restore clocks, ARC votes and sensor power.
+- Main mode1 (4640x3472), 60-frame runs produce recognizable scenes. The user
+  confirmed the first scene was the power adapter; the subsequent laptop scene
+  visibly changes to a laptop keyboard/display. Evidence: ignored local files
+  logs/phone-camera-laptop.log, .raw and -proof.png.
+- Laptop test: cam_shutter=3000, cam_gain=256; register readback verifies 0x0202
+  = 0x0bb8, 0x0204 = 0x0100. 60 frames complete in about 3 seconds. The proof
+  PNG subtracts black level64, averages all four Bayer phases and stretches the
+  histogram for inspection; it is grayscale and does not validate Bayer order,
+  white balance or orientation. It is not an iOS Camera.app photograph.
+- Low-gain frames contain scene detail very close to black64. The old camraw.py
+  first-look scaling does not subtract black, obscuring it. Never infer sensor
+  failure from that rendering alone or from sampling only the top row.
+- Minimal diagnostic root logs/camera-idle.packfs uses cpus=1, no GPU/Wi-Fi/audio
+  initialization and loader_return_after=25. Normal +24 iOS image remains
+  logs/renoir-clock24-normal-phone.bin. The resident system RAM image was cleared
+  for these tests: restage system.packfs before resuming normal iOS.
+- cam=5 and loader advertisement remain gated: continuous ring handling, sensor
+  gain laws/descriptors, Bayer/orientation, autofocus, and app preview/capture
+  must still be implemented and tested. No claim of a completed camera port.
+
+### Front S5K3T2 bring-up
+
+Shima GPIO176/177 power switches advertise EGPIO_PRESENT (CFG bit11). Android
+msm_pinmux_set_mux enables ownership bit12 when that flag is set. The old camera
+helper discarded those upper CFG bits, so both supplies appeared configured but
+the front sensor never acknowledged. pin_config now preserves upper CFG bits and
+sets EGPIO_ENABLE for Renoir only; saved-state restoration remains exact. It is
+also used for active reset/MCLK and software-I2C pin setup. Hardware confirms
+both supply CFGs change from 0x801 to 0x1a00 and sensor ID becomes 0x3142.
+
+Front cam4 mode1 captures 60 RAW10 frames at 2592x1940 through PHY5, with expected
+6285600 packet bytes and no observed SMMU/overflow/CCIF faults. Table defaults
+leave exposure at six lines. The bounded-capture exposure override now admits
+Renoir S5K3T2's existing SMIA hold/write sequence: shutter1500, gain32 reads back
+as 0x05dc / 0x0020. Result is a recognizable ceiling/wall-shaped grayscale image;
+a second scene aimed at the laptop now visibly shows its screen and surrounding room (logs/phone-camera-front-laptop-proof.png). Local evidence:
+logs/phone-camera-front-egpio.log, phone-camera-front-exposure.log/.raw and
+phone-camera-front-exposure-proof.png. This does not enable Camera.app streaming.
+
+Camera power ASan/UBSan tests cover Renoir EGPIO-present and absent paths,
+non-Renoir behavior, exact rail restoration and partial write failures. The
+580 core, CSID/PHY5, board admission and rail ownership tests also pass.
+
+Front second-scene regression: phone-camera-front-laptop.log/.raw; 60 frames at
+2592x1940, expected packet byte count, no observed SMMU/CCIF/overflow faults;
+sensor power, GPIO supplies, clock and ARC restoration completed. The grayscale
+proof still has uncorrected orientation and is not Camera.app preview.
+
+## Continuous capture bring-up
+
+`git fetch origin` verified the current main on 2026-10-19. Its camera userland
+(camera_device.c, camera_isp.c and inject_media.c) already matches our integrated
+40a5d29 version, including daf7552 stream start on reservation. No extra camera
+commit was missing; unrelated APFS changes remain excluded as requested.
+
+Experimental Renoir cam5 now requires `cam_stream_test=1`. Normal boots without
+that explicit flag still reject it. Only tested main/front sensor indices 1/2
+are admitted by ios_select; usual modes are 7 and 1. Tested gain bounds remain
+conservative: main32..256, front32 (unity only). Other sensors remain unsupported
+in streaming mode pending gain/write validation.
+
+Lite580 frame-mode capture stalled after a single frame with Redwood's SOF-based
+buffer updates, even with native frame increment. Re-arm the next DMA address
+at completion as in the successful bounded RAW path. Ring selection excludes
+the completed frame and any slot being copied by a reader, under ios_lock.
+The real static-RAM phone probe completed 45 reads each from main -> front ->
+main with close/reopen in between, no SMMU/CCIF/overflow fault. Evidence:
+logs/phone-camera-stream-done-live.log. Host selector tests use the actual driver
+helper with all reader-state combinations, under ASan/UBSan.
+
+The first full iOS test had an invalid *compressed* small RAM image. Early GPU
+firmware lookup explicitly rejects PACKFS_F_CHUNKED; unlike mounted packfs it
+cannot decompress. GPU did not start and the user reported slow/broken rendering.
+Do not use logs/renoir-camera-ios.bin (old compressed diagnostic). The corrected
+logs/renoir-camera-ios-fixed.bin uses plain logs/renoir-camera-ios.packfs, checked
+by tools/check_renoir_gpu_ramdisk.py against the local vendor files. The checker
+also correctly rejects the bad image. Normal userland/root.packfs and the known
+clock24-normal-phone.bin were not replaced. Full iOS preview is still unproven.
+
+USB packaging must include `mkpayload.py --usb loader.efi=...`; without --usb the
+loader does not stay resident. Corrected temporary image: logs/renoir-camera-usb.img.
+Always fastboot boot; no partition writes.
+
+### Installed sensor gain audit
+
+Read-only ADB pull from the fully booted Android (sys.boot_completed=1,
+SurfaceFlinger running), 2026-10-19:
+
+- com.qti.sensor.renoir_ofilm_s5kgw3_wide.so, SHA256
+  e5e8e30a3e4b2a6f88b069b1f335f3ca7cf31c52de2dfdc8a220d900cb4d68fd.
+- com.qti.sensor.renoir_sunny_s5k3t2_front.so, SHA256
+  2e1ebae3db87981cbbb63db9345a8f7d570de74ee6ba5a2108a967e19d9445a6.
+
+GetSensorLibraryAPIs installs CalculateExposure at ELF VA0x1018 in each library.
+Disassembly (ignored logs/renoir-vendor-{wide,front}.asm) shows gain clamped to
+1..64 (wide) / 1..16 (front), converted to integer with five fractional bits
+(fcvtzu w8,d3/d4,#5), with register cap2048 /512. Both therefore use unity32
+and linear analog gain. Descriptors now use those native limits, superseding the
+initial conservative32..256 /32-only bring-up limits. The earlier 45-frame
+switching probe exercised the old conservative limits; broader dynamic AE is
+not yet hardware-validated. No OTP or calibration was written.

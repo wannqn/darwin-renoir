@@ -122,3 +122,6 @@ void redwood_gpu_stop(void);
 #endif
 
 #endif /* _SYS_REDWOOD_INPUT_H_ */
+
+bool redwood_renoir_haptic_supply(uint32_t *millivolts, bool *enabled);
+bool redwood_renoir_haptic_supply_vote(bool on);

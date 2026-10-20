@@ -62,10 +62,11 @@ static inline void rcam_ife_stop(const struct rcam_io *io)
     (void)io->put(io->context, 0x1a1c, 0, false);
 }
 static inline bool rcam_ife_start(const struct rcam_io *io, uint64_t address,
-    uint32_t frame_bytes, uint32_t frame_inc)
+    uint32_t frame_bytes, uint32_t frame_inc, uint32_t stride)
 {
     /* Frame-mode writes packed CSI bytes. There is no bus-v2 address offset. */
-    if (!frame_bytes || address > UINT32_MAX || (address & 15) ||
+    if (!stride || stride > 0xffff || (stride & 15) || frame_bytes % stride ||
+        !frame_bytes || address > UINT32_MAX || (address & 15) ||
         address + frame_bytes > (1ull << 32) || (frame_inc && frame_inc != frame_bytes)) return false;
     if (!io->put(io->context, 0x28, 0x20000, false) ||
         !io->put(io->context, 0x0c, 2, false) ||
@@ -74,7 +75,9 @@ static inline bool rcam_ife_start(const struct rcam_io *io, uint64_t address,
         {0x34, UINT32_MAX}, {0x38, UINT32_MAX}, {0x3c, UINT32_MAX}, {0x24, 1},
         {0x1a20, UINT32_MAX}, {0x1a24, UINT32_MAX}, {0x1a30, 1},
         {0x1a08, 0x3ffffff}, {0x1a34, 0}, {0x1adc, 0},
-        {0x1c0c, 0xffff}, {0x1c10, 0xffff}, {0x1c14, 0}, {0x1c18, 0},
+        /* cam_vfe_bus_ver3_update_wm: cfg1 is h_init, cfg2 is the actual
+         * DMA row stride. Leaving cfg2 zero corrupts rows and buffer bounds. */
+        {0x1c0c, 0xffff}, {0x1c10, 0}, {0x1c14, stride}, {0x1c18, 0},
         {0x1c28, 0}, {0x1c2c, 0}, {0x1c30, 0}, {0x1c34, 1},
         {0x1c38, 0}, {0x1c3c, 1}, {0x1c60, 0}, {0x1c64, 0xf},
         {0x1c78, 11u << 8}, {0x1a18, 1u << 4}, {0x1a1c, 0},

@@ -27,21 +27,25 @@ int main(void){
  assert(rcam_dphy_rate_supported(2137600000ull));
  assert(!rcam_dphy_rate_supported(0) && !rcam_dphy_rate_supported(3200000000ull));
  struct mock m={0};struct rcam_io io={&m,put,wait,delay,get};
- assert(rcam_ife_start(&io,0x40001000,2400000,2400000));
+ assert(rcam_ife_start(&io,0x40001000,2400000,2400000,2000));
  assert(m.reg[0x1c00/4]==0x10001 && m.reg[0x1c04/4]==0x40001000);
- assert(m.reg[0x1a18/4]==16 && m.reg[0x20/4]==1 && m.reg[0x1c10/4]==0xffff);
+ assert(m.reg[0x1a18/4]==16 && m.reg[0x20/4]==1);
+ assert(m.reg[0x1c10/4]==0 && m.reg[0x1c14/4]==2000);
  unsigned n=m.writes;
  for(unsigned f=1;f<=n;f++){
   memset(&m,0,sizeof(m));m.fail=f;
-  assert(!rcam_ife_start(&io,0x40001000,2400000,2400000));
+  assert(!rcam_ife_start(&io,0x40001000,2400000,2400000,2000));
   assert(m.reg[0x1c00/4]==0 && m.reg[0x1a18/4]==0);
  }
  memset(&m,0,sizeof(m));m.timeout=true;
- assert(!rcam_ife_start(&io,0x40001000,2400000,2400000));assert(m.reg[0x1c00/4]==0);
+ assert(!rcam_ife_start(&io,0x40001000,2400000,2400000,2000));assert(m.reg[0x1c00/4]==0);
  memset(&m,0,sizeof(m));
- assert(!rcam_ife_start(&io,0x40001001,100,100));assert(m.writes==0);
- assert(!rcam_ife_start(&io,0xfffffff0,32,32));assert(m.writes==0);
- assert(!rcam_ife_start(&io,0x40000000,100,200));assert(m.writes==0);
+ assert(!rcam_ife_start(&io,0x40001001,100,100,16));assert(m.writes==0);
+ assert(!rcam_ife_start(&io,0xfffffff0,32,32,16));assert(m.writes==0);
+ assert(!rcam_ife_start(&io,0x40000000,100,200,16));assert(m.writes==0);
+ assert(!rcam_ife_start(&io,0x40001000,2400000,2400000,0));
+ assert(!rcam_ife_start(&io,0x40001000,2400000,2400000,1999));
+ assert(!rcam_ife_start(&io,0x40001000,2400001,2400001,2000));
  for(unsigned lanes=1;lanes<=4;lanes++){
   memset(&m,0,sizeof(m));assert(rcam_phy_start(&io,lanes,0x3210,14));
   assert(m.reg[0x814/4]==0xd5 && m.reg[0x81c/4]==0x5a);

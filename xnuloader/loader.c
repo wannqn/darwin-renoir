@@ -1760,6 +1760,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/redwood_camera.c) */
 	int camera_requested = 0;
+	int renoir_haptic_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
 	for (const char *c = pi.cmdline; *c; c++) {
@@ -1771,6 +1772,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
+		renoir_haptic_requested |= starts_with(c, "haptic=5") && (c == pi.cmdline || c[-1] == ' ') && (c[8] == 0 || c[8] == ' ');
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
 	}
 	if (battery_requested) {
@@ -2015,7 +2017,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * hands them to the kernel's motor driver); without it iOS looks for an IOKit vibration motor
 	 * that the iPhone X does not have, and nothing vibrates.
 	 */
-	if (!str_eq(PLAT->name, "renoir")) {
+	if (!str_eq(PLAT->name, "renoir") || renoir_haptic_requested) {
 		dt_begin(&w, "haptics");
 		dt_identity(&w, identity_haptics, sizeof(identity_haptics) / sizeof(identity_haptics[0]), identity_haptics_data);
 		dt_end(&w);
@@ -2025,9 +2027,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * it Control Center has no flashlight); with cam=5 the node itself, for a camera there is (with it
 	 * MobileGestalt's video-camera). The rest of the iPhone's camera is not here, nor said to be.
 	 */
-	if ((torch_requested || camera_requested) && !str_eq(PLAT->name, "renoir")) {
+	if (camera_requested || (torch_requested && !str_eq(PLAT->name, "renoir"))) {
 		dt_begin(&w, "camera");
-		if (torch_requested) {
+		if (torch_requested && !str_eq(PLAT->name, "renoir")) {
 			dt_identity_one(&w, identity_camera, sizeof(identity_camera) / sizeof(identity_camera[0]), identity_camera_data, "flash");
 		}
 		dt_end(&w);

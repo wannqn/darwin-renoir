@@ -28,7 +28,7 @@ struct ctab_entry { uint16_t address, data; uint8_t ab,db,op,z; uint32_t delay_u
 struct { struct supply vana, vdig, vio, vaf; } test_hw, *hw = &test_hw;
 static uint32_t mmio[1024];
 static int writes, fail_write, ldo_n, ldo_mv;
-static bool broken;
+static bool broken, camera_renoir;
 #define GPIO_CFG(n) (2*(n))
 #define GPIO_IO(n) (2*(n)+1)
 #define CFG_OUTPUT 512
@@ -47,7 +47,7 @@ static bool mclk_on(unsigned n) { return n==19200; }
 static void mclk_off(void) {}
 static void sensor_delay(unsigned n) { (void)n; }
 '''
-code += journal + '\n' + '\n'.join(function(n) for n in ['gpio_supplies_changed','supply_on','supply_off','power_step'])
+code += journal + '\n' + '\n'.join(function(n) for n in ['pin_config','gpio_supplies_changed','supply_on','supply_off','power_step'])
 code += r'''
 int main(void) {
     hw->vana=(struct supply){SUPPLY_GPIO,0,2800,176,135};
@@ -70,6 +70,14 @@ int main(void) {
         assert(mmio[352]==0x17 && mmio[353]==0);
         assert(!gpio_supplies_changed());
     }
+    camera_renoir=true;
+    mmio[352]=0x8800;mmio[353]=0;
+    assert(supply_on(&hw->vana)); assert(mmio[352]==0x9a00);
+    supply_off(&hw->vana); assert(mmio[352]==0x8800 && mmio[353]==0);
+    mmio[352]=0x8000;
+    assert(supply_on(&hw->vana)); assert(mmio[352]==0x8200);
+    supply_off(&hw->vana); assert(mmio[352]==0x8000);
+    camera_renoir=false;
     struct ctab_entry e={.address=4,.data=1};
     assert(power_step(&e,true));assert(ldo_n==3 && ldo_mv==2800);
     e.data=0;assert(power_step(&e,false));assert(ldo_n==-3);

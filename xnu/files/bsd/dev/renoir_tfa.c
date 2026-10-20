@@ -396,7 +396,7 @@ void renoir_tfa_amp_release(void) {
 }
 bool renoir_tfa_amp_volume(uint32_t below,unsigned fade_ms) {
     (void)fade_ms;
-    if(below<240)below=240; /* Conservative -30dB digital cap until audible tests. */
+    if(below<160)below=160; /* At most -20dB; louder operation needs separate characterization. */
     if(below>960)below=960;
     uint64_t scale=2147483647u;
     for(unsigned i=0;i<below;i++)scale=(scale*2116801233u)>>31; /* -1/8dB per step */
