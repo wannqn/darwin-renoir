@@ -793,3 +793,7 @@ The driver checks board, revision, channel owner, faults, idle state and supply 
 The non-storage endpoint changes through upstream `f421d04` are integrated in `62e52a8`; see [the commit ledger and test limits](upstream-20261020.md). APFS, persistent var-store and UFS writes are deferred; boot still uses packfs in RAM. Existing Renoir Wi-Fi/audio/GPU/haptic drivers and the +24 clock offset remain.
 
 XNU, both loader configurations, Mesa/AIR and complete userland build successfully. Updated kernel and userland fallback binaries are locally rebuilt, not upstream APFS snapshots. QEMU reached the home screen with the latest kernel. Physical-phone testing of this combined update is pending. Normal boots keep real camera streaming disabled; experimental `cam=5 cam_stream_test=1` still needs hardware regression. Native RAW proof from earlier sessions must not be confused with a finished Camera.app port.
+
+### Wi-Fi DMA pool reservation — 2026-10-20
+
+The combined upstream update booted with working UI/touch/Settings but ath11k failed with ENOMEM allocating its 80 MiB contiguous pool after userland startup. Reserve the same pool early for Renoir, and consume it only when the original runtime SMMU mapping is ready. This does not change the radio driver or its DMA addresses. Host reservation/consumption tests passed; physical regression obtained DHCP, DNS and HTTPS 200, and the user confirmed Wi-Fi plus Safari work. See [the integration log](upstream-20261020.md). Camera remains disabled for this normal test boot.

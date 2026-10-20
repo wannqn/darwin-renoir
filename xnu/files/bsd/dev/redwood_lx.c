@@ -55,6 +55,27 @@ lx_os_free(void *memory, unsigned long size)
 	kfree_data(memory, size);
 }
 
+/* Renoir's ath11k pool is 80 MiB (wifi/lx/src/lx_base.c). Reserve it
+ * before userland fragments RAM; only lx_os_radio_memory may map it to
+ * the radio, after PCIe and the SMMU have been initialized. Boot lifetime,
+ * like the driver's pool itself. A failed reservation leaves the normal
+ * allocation path available; no device or page table is touched here. */
+#define RENOIR_LX_POOL_BYTES (80ul << 20)
+static vm_offset_t lx_early_pool;
+
+static void
+lx_reserve_radio_pool(void)
+{
+    if (!redwood_board_is("renoir") || lx_early_pool != 0) return;
+    if (kmem_alloc_contig(kernel_map, &lx_early_pool, RENOIR_LX_POOL_BYTES,
+        0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+        lx_early_pool = 0;
+        say("lx: early Renoir 80 MiB radio pool reservation failed\n");
+        return;
+    }
+    say("lx: reserved Renoir 80 MiB radio pool before userland; not mapped to the radio yet\n");
+}
+
 /*
  * In one physical piece, so that it can be mapped a second time without this processor's cache
  * in between (as redwood_adreno.c does with what it shares with the GPU); the first, cached
@@ -67,7 +88,11 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
 	uint64_t physical;
 
 	size = round_page(size);
-	if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+    if (size == RENOIR_LX_POOL_BYTES && lx_early_pool != 0) {
+        cached = lx_early_pool;
+        lx_early_pool = 0; /* exactly one consumer; the pool retains ownership */
+        say("lx: using the early Renoir radio pool\n");
+    } else if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
 	    KERN_SUCCESS) {
 		say("lx: no %lu bytes of memory in one piece\n", size);
 		return NULL;
@@ -349,6 +374,7 @@ redwood_lx_net_early(void)
 	uint8_t address[6];
 
 	if (redwood_wifi_radio_address(address)) {
+        lx_reserve_radio_pool();
 		lx_os_net_attach(address);
 	}
 }
