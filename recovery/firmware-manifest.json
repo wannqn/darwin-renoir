@@ -1,0 +1,305 @@
+{
+  "device": "renoir",
+  "files": [
+    {
+      "path": "fw-gpu/renoir/a660_sqe.fw",
+      "bytes": 40496,
+      "sha256": "f911a4badf7b56719cb130492bc39f9edb85335f54e8b4983b5c67eb9e6204bb"
+    },
+    {
+      "path": "fw-gpu/renoir/a660_gmu.bin",
+      "bytes": 55256,
+      "sha256": "6bb9360a1601253a86ee3ae1b9b916f5f1832a72d55e9b8573567f1740c94e2b"
+    },
+    {
+      "path": "fw-gpu/renoir/a660_zap.mdt",
+      "bytes": 6860,
+      "sha256": "c871399d4dc94656a34d2503c60a6aa81fb7a5dabec1e89d71995a7f7bfec47b"
+    },
+    {
+      "path": "fw-gpu/renoir/a660_zap.elf",
+      "bytes": 14264,
+      "sha256": "581b07a88cbe92fabcae888730d45e566a4a8b09a8bba19e0a7c58d280362deb"
+    },
+    {
+      "path": "fw-gpu/renoir/a660_zap.b00",
+      "bytes": 148,
+      "sha256": "ce73476cb8cf86abc79885ddc4e178dfa7884fc8f5ed7254b6d756a4244a23bf"
+    },
+    {
+      "path": "fw-gpu/renoir/a660_zap.b01",
+      "bytes": 6712,
+      "sha256": "3e5a9284513eda1ef376c5a55b19fac246f49e0a082232113b18ffaec39934cb"
+    },
+    {
+      "path": "fw-gpu/renoir/a660_zap.b02",
+      "bytes": 1976,
+      "sha256": "1a5fdbf458ea547c5459b301ab577a83461797b77bde9501fb48fc62d2d5f185"
+    },
+    {
+      "path": "fw-wifi/renoir/amss20.bin",
+      "bytes": 5197824,
+      "sha256": "b267bd330a29a689cc90db7acb4869cd744b07dc593a6003c1a4851e720d9469"
+    },
+    {
+      "path": "fw-wifi/renoir/m3.bin",
+      "bytes": 266684,
+      "sha256": "9f15c0e0521558434f9cdeeb6c57edc7d641f675bf5711e070d6a4bbee53879c"
+    },
+    {
+      "path": "fw-wifi/renoir/bd_k9gl.elf",
+      "bytes": 59916,
+      "sha256": "3d6f55af3d733e4d4e68f765ebf575d28e32dcbe0b3921ffc18b1d5240525be9"
+    },
+    {
+      "path": "fw-wifi/renoir/bdwlan.elf",
+      "bytes": 59912,
+      "sha256": "a231f35fe8673bb8f164751c5d3faf45753555f83df4fe729a0103d49956780b"
+    },
+    {
+      "path": "fw-wifi/renoir/regdb.bin",
+      "bytes": 24278,
+      "sha256": "3f549885dffeb67acd602e236ccfa815d33d03dd1b0d12aaca5557334a9e38bf"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.mdt",
+      "bytes": 9660,
+      "sha256": "96c60d926472a13bddf9f2b0b1ab101573f2ff5316602f24f2222f66dd3fe482"
+    },
+    {
+      "path": "fw-audio/renoir/tfa98xx.cnt",
+      "bytes": 3828,
+      "sha256": "5be2bd9002beef1f7222450be59118b0d34f8d8338c67a35aa1d65c6e071d09e"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b00",
+      "bytes": 1268,
+      "sha256": "9f63fee4518165c5a888fcccc8c478b7090311c396f1c9f0427d2d5af90a8fee"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b01",
+      "bytes": 8392,
+      "sha256": "2773d02c189602d0b67473a81258ab7a42f8881db532ad693d948a0727141017"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b02",
+      "bytes": 7496,
+      "sha256": "15d5c62ca0666d1c1b4e532dd6818d9eb695413e7a7dfbbe39d50593466e816f"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b03",
+      "bytes": 2401224,
+      "sha256": "fc02cedf75a901ccccd5bb3138188082d31310ac99728e5315d1d3219e77d321"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b04",
+      "bytes": 26876,
+      "sha256": "2b24bd6b08e194ef39bb5ed5810619f34d5779e92f91e47f0fde8f35df5c7802"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b05",
+      "bytes": 28512,
+      "sha256": "53669eae60343f774ddaca39b85063a73ae90b842761949a125292b4e88d3c81"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b06",
+      "bytes": 1096,
+      "sha256": "546c81fa9ce2949d8e0f657338bbe6848dcfd8c3bc7ff0be48ffc492bc5b85e5"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b07",
+      "bytes": 671744,
+      "sha256": "a40aa3447925c79205fefe643da3b7570fc1226ecb0d3b750ab75b96c4cc0af2"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b08",
+      "bytes": 840,
+      "sha256": "b9975a899e37f648aa3d6423ac1e6fd198c06f5fb195da405cf9650c6756c938"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b09",
+      "bytes": 2564,
+      "sha256": "8657542c09d2c3ac37e84806c62a3ef2962190ec7b7a27f94a76eb1b1cd0b1a9"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b10",
+      "bytes": 2036712,
+      "sha256": "c1ed5ce583a3bd148421607a86859c9032c49346e0c87beb0c7c32afc177bdf5"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b11",
+      "bytes": 172872,
+      "sha256": "ca094af346cc309cd93f5c408c9f6102045a5dfb8c58b895cc0ace51ba943259"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b12",
+      "bytes": 3056,
+      "sha256": "754db17c46676afe919b132e57c8e0342e8ebbf5258aa52d9b241266c329ebb8"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b13",
+      "bytes": 44072,
+      "sha256": "bcf3ef4d943af74cfe6ded4949bffe41e1ee10baabfd1e898c35f8057c328c46"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b14",
+      "bytes": 122272,
+      "sha256": "a01de2a3e413cc97546c594cc451a16ecb46bc2a60d1334e3a69a1a6905f78b7"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b15",
+      "bytes": 81288,
+      "sha256": "2a0649a2d742464d9fe0a655cdeb9658fb2ec891b512e70cde5e8e6dc933d4e7"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b16",
+      "bytes": 853280,
+      "sha256": "56738300dc5101424be9318bb58aa84cfda97bc6719e8423f2e642bcd4d621a9"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b17",
+      "bytes": 1806820,
+      "sha256": "24bb5a94e6215709cb4a10eed6a2997196942445928cae1e545086de61c2179c"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b18",
+      "bytes": 90776,
+      "sha256": "0224e7490720287774745e83ca98c7fba3b00482d967724820cf64b55b80bccb"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b19",
+      "bytes": 272,
+      "sha256": "3106f8acd5fca4209f484a133cadab70f69e8b147aa4930ee2fb176dc3bc7c0f"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b20",
+      "bytes": 225434,
+      "sha256": "3d0f2f9642ce56adafa08fd9e74a14d3c9682666e7e8cca392f86402b2ae5d3c"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b21",
+      "bytes": 1591672,
+      "sha256": "da466d80632abde082530a01e99b8193cf476919e746ebdfe940d61f308874ad"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b22",
+      "bytes": 303108,
+      "sha256": "8ce622033b835e5e49316416bd595ff892836aad17ea9e5cc9a66d430087bc6e"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b23",
+      "bytes": 11907,
+      "sha256": "b54e0f71425e2cb39382a2426a57fbe16551477509458bc8d49155908d1d9870"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b24",
+      "bytes": 13224,
+      "sha256": "b5d4457ab0759b922020460049096c3ae2ca4fef33b09e0af9cc010216cc6e61"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b25",
+      "bytes": 1572,
+      "sha256": "60a312d3ca0fc7f1314618b7c048f73defa375ed7903d12c949100e9f75fdf29"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b26",
+      "bytes": 82528,
+      "sha256": "cf8541c636a6c90f12c2ce39d7a10877aab94cd4164db59e9e8f0f0e9cc1e169"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b27",
+      "bytes": 50276,
+      "sha256": "05ff16e29645ce9d8f79fd2a06259baf92ca79fbb53c682abe7a4c613ab045e4"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b28",
+      "bytes": 382644,
+      "sha256": "bf1d774ef071e7b180ad04b607239a6addf31cf7279e9a593583127e4915c8f7"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b29",
+      "bytes": 9350060,
+      "sha256": "5acc8ddd1708fbce69b4fb643190af9bed3e646751e829a3e37546dce0b3b02d"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b30",
+      "bytes": 487368,
+      "sha256": "1b0eb785f7ca038dca9ce7bece4b56fe90b13fe64eb66871cb1c7ee4615892ee"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b31",
+      "bytes": 4744,
+      "sha256": "e07d2139d20d49357c5141af66cef8303137393e82e739ee9966d7fd11cbb589"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b32",
+      "bytes": 158088,
+      "sha256": "b613142036261c9f56aab6661005a4272f14b7b4bc02294fadc198901e442d92"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b33",
+      "bytes": 466772,
+      "sha256": "3bfaf63130599427175114464906612eac6523c861dbc7dd314606bca44c71f8"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b34",
+      "bytes": 1477,
+      "sha256": "5f80428f007978320e4120b7ede223fd813fc0f7ea689dc74c9cd3b46f537fa8"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b35",
+      "bytes": 38887,
+      "sha256": "cf7528f765d8702055fe035217e31db2a4bcc593e1dc0ca80241e8eb3fe8a5a1"
+    },
+    {
+      "path": "fw-audio/renoir/adsp.b36",
+      "bytes": 380636,
+      "sha256": "c0f504a3f67b1736cfacfede054bc710830d30610434ada19195096420e92223"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.actuator.renoir_ofilm_s5kgw3_dw9800_wide.so",
+      "bytes": 11408,
+      "sha256": "b31ba97bf3d50efcc3855074f2e26b7b84b705a2d66f94feaafb919273372a25"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.sensormodule.renoir_ofilm_imx355_ultra.bin",
+      "bytes": 56939,
+      "sha256": "86d39ec28b294a88abbe230b23f1bea5970745845360b454b9deb894c994a76e"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.sensormodule.renoir_ofilm_s5kgw3_wide.bin",
+      "bytes": 861159,
+      "sha256": "235acd05a4fdddfe35ec2bb45768d48119124a89a0b5a0a48733cca1d9a5f16c"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.sensormodule.renoir_sunny_s5k3t2_front.bin",
+      "bytes": 129455,
+      "sha256": "e0cd635495201f9a8f53da2b4d374cdc7e52d0a68d298aa3eb5fc04c2b850633"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.sensormodule.renoir_sunny_s5k5e9yx04_macro.bin",
+      "bytes": 34340,
+      "sha256": "bdfee291f9f83edf26fdf472362f5da4f3cd21b1fa30eb6b5aa7a9973b7a40ae"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.tuned.renoir_ofilm_imx355_ultra.bin",
+      "bytes": 14708971,
+      "sha256": "b937b1d02e0228d4fc8e8dfe18518141d00968996656172a5a3a51585b407349"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.tuned.renoir_ofilm_s5kgw3_wide.bin",
+      "bytes": 23882861,
+      "sha256": "cdb78d1335dbe4c884139f489bad0dd8d56f1382973f22036e069b532dd25641"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.tuned.renoir_sunny_s5k3t2_front.bin",
+      "bytes": 5495989,
+      "sha256": "daf7cce6e51253779cf7401e333abc495c97315114b8aa4a23c372971ae3c81d"
+    },
+    {
+      "path": "fw-camera/renoir/com.qti.tuned.renoir_sunny_s5k5e9yx04_macro.bin",
+      "bytes": 2289931,
+      "sha256": "6ac58d3c1a1d4633218f0f08a94c35e2a11e52b638b1f136bfe5eb04d8b3b3d9"
+    }
+  ]
+}

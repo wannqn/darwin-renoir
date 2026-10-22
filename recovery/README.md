@@ -46,6 +46,10 @@ experiment is archived separately and is not enabled in the working configuratio
 
 ## Rebuilding
 
+For a new computer without recovery assets, use the complete
+[source build guide](BUILD-FROM-SOURCE.md). Board firmware is now tracked in Git;
+see [vendor input inventory](FIRMWARE.md).
+
 Build inputs include Theos SDK/toolchain, XNU host tools/libraries and QEMU.
 Install Linux packages as needed: clang, lld, llvm, make, cc/c++, git, curl, Python,
 7z, flex, bison, autoconf, automake, nasm, pkg-config. Use the WSL Linux filesystem.

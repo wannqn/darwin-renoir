@@ -11,6 +11,10 @@ Boots through a custom Project Silicium UEFI. **RAM boot only: no flashing or er
 
 ## Restore and boot
 
+To build without downloading this repository's recovery release, follow the
+[source build guide](recovery/BUILD-FROM-SOURCE.md). Renoir GPU, Wi-Fi, audio and
+camera vendor inputs are included in Git; Apple iOS files and build tools are fetched separately.
+
 Requires Linux/WSL, Python 3.12+, GitHub CLI, platform-tools and ~20 GB free space.
 The repository is private; authenticate with `gh auth login` first.
 
