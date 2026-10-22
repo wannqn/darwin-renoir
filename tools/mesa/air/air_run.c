@@ -153,13 +153,41 @@ watch_for_faults(void)
 static void watch_for_faults(void) {}
 #endif
 
+/* set by --library: the fill below is then floats, for the reason given there */
+static bool library_fill = false;
+
+/* The argument buffer of a wrapped library function holds floats, not the byte
+ * pattern.
+ *
+ * Every one of these functions is compiled with no-nans-fp-math and
+ * no-infs-fp-math: the module promises its inputs are finite. Arbitrary bytes
+ * are mostly not -- they are infinities, NaNs and denormals -- so the inputs
+ * would land outside the contract the shader was compiled under, where
+ * 0 * inf may legally be either NaN or inf and a disagreement means nothing.
+ * One case did disagree exactly there (folded NaN, softpipe +inf) and said
+ * nothing about either side.
+ *
+ * Word w is ((w * 13) % 29 - 14) / 4: finite, exactly representable in
+ * binary32, and different for 29 words running -- so a harness that mixed up
+ * two slots, or two lanes of one slot, would get a different answer. cpuref.py
+ * fills the same words.
+ */
+static uint8_t
+library_byte(unsigned i)
+{
+   float f = (float)((int)((i / 4 * 13) % 29) - 14) / 4.0f;
+   uint32_t u;
+   memcpy(&u, &f, sizeof(u));
+   return (u >> (8 * (i % 4))) & 0xff;
+}
+
 /* the pattern cpuref.py and air2nir --eval fill their buffers with, so that
  * all three agree on what the shader was given
  */
 static uint8_t
 pattern_byte(unsigned i)
 {
-   return (i * 7 + 13) & 0xff;
+   return library_fill ? library_byte(i) : (i * 7 + 13) & 0xff;
 }
 
 /* Fill a buffer the shader is about to read.
@@ -623,7 +651,18 @@ dispatch_kernel(struct pipe_screen *screen, const struct air_shader_info *info,
          .mag_img_filter = PIPE_TEX_FILTER_NEAREST,
          .min_mip_filter = PIPE_TEX_MIPFILTER_NONE,
          .unnormalized_coords = 1 });
-      pipe->bind_sampler_states(pipe, PIPE_SHADER_COMPUTE, 0, num_tex, &csampler);
+      /* one entry per texture, not the address of one pointer. bind_sampler_states
+       * reads num_tex pointers from what it is given, so passing &csampler made
+       * the driver take whatever followed that single variable on the stack and
+       * store it as samplers[1..]; fd6_texture_state then dereferenced those for
+       * ->seqno and died at a wild address. It only showed with two or more
+       * textures, which is why 22 kernels bound images here without trouble and
+       * four did not. The draw path below always did this correctly.
+       */
+      void *csamplers[MAX_IMG] = { 0 };
+      for (unsigned i = 0; i < num_tex && i < MAX_IMG; i++)
+         csamplers[i] = csampler;
+      pipe->bind_sampler_states(pipe, PIPE_SHADER_COMPUTE, 0, num_tex, csamplers);
       pipe->set_sampler_views(pipe, PIPE_SHADER_COMPUTE, 0, num_tex, 0, false, views);
    }
 
@@ -645,10 +684,11 @@ dispatch_kernel(struct pipe_screen *screen, const struct air_shader_info *info,
    printf("air_run: dispatching %ux%ux1 threads in one workgroup; %u device buffer%s bound, "
           "%u of them written, filled with (i * 7 + 13) & 0xff\n",
           GRID, GRID, num_ssbo, num_ssbo == 1 ? "" : "s", num_written);
-   if (num_img)
-      printf("air_run: %u image%s bound (%u written), %ux%u, texel (x,y,z) of slot n = "
-             "(100+x+1000n, 200+y, 300+x+y+z, 400)\n", num_img, num_img == 1 ? "" : "s",
-             num_img_written, TEX_SIZE, TEX_SIZE);
+   if (num_img || num_tex)
+      printf("air_run: %u image%s bound (%u written) and %u texture%s, %ux%u, texel (x,y,z) of "
+             "slot n = (100+x+1000n, 200+y, 300+x+y+z, 400)\n", num_img,
+             num_img == 1 ? "" : "s", num_img_written, num_tex, num_tex == 1 ? "" : "s",
+             TEX_SIZE, TEX_SIZE);
    pipe->launch_grid(pipe, &grid);
    pipe->flush(pipe, NULL, 0);
 
@@ -716,6 +756,11 @@ main(int argc, char **argv)
     * creation, so it has to be set before the screen is made.
     */
    bool want_disasm = false;
+   /* --library runs an air.visible library function through the generated
+    * wrapper (nir_air.h): there is nothing to dispatch otherwise, so these 135
+    * modules were never run at all.
+    */
+   bool want_library = false;
    /* --buffer FILE is AIR_RUN_BUFFER as an argument, and it exists because the
     * device has no shell to set one with. iOS 16.5's own root carries no sh at
     * all -- /bin holds df and ps -- and the job list that runs this is read by
@@ -730,6 +775,10 @@ main(int argc, char **argv)
          setenv("IR3_SHADER_DEBUG", "disasm", 1);
          argv++;
          argc--;
+      } else if (!strcmp(argv[1], "--library")) {
+         want_library = library_fill = true;
+         argv++;
+         argc--;
       } else if (!strcmp(argv[1], "--buffer") && argc > 2) {
          setenv("AIR_RUN_BUFFER", argv[2], 1);
          argv += 2;
@@ -739,7 +788,7 @@ main(int argc, char **argv)
       }
    }
    if (argc < 2) {
-      fprintf(stderr, "usage: air_run [--disasm] [--buffer FILE] "
+      fprintf(stderr, "usage: air_run [--disasm] [--library] [--buffer FILE] "
                       "FILE[.metallib] [FUNCTION]\n");
       return 2;
    }
@@ -849,7 +898,8 @@ main(int argc, char **argv)
    /* the shader */
    struct air_constant_value *fc;
    unsigned num_fc = air_module_function_constants(ctx, bitcode, bitcode_size, &fc);
-   struct air_to_nir_options air_options = { .constants = fc, .num_constants = num_fc };
+   struct air_to_nir_options air_options = { .constants = fc, .num_constants = num_fc,
+                                            .library_wrapper = want_library };
    struct air_shader_info info;
    const char *err;
    nir_shader *fs = air_to_nir(ctx, bitcode, bitcode_size, NULL, &air_options, options,
