@@ -1,39 +1,34 @@
-> Renoir iOS RAM boot backup: start with [Recovery/README.md](Recovery/README.md).
-> This branch contains the custom XNU loader hooks. No flashing.
+# Renoir custom UEFI
 
-# Project Silicium UEFI for ARM64-Based Devices
+Project Silicium source snapshot for **Mi 11 Lite 5G (renoir)** and RAM-only iOS boot.
+Contains our BootShim payload placement, XNU BootManager dispatch and memory map.
 
-<!-- ![Banner](https://github.com/Project-Silicium/Mu-Silicium/blob/main/Resources/Pictures/Banner.png) -->
+Kernel, drivers and ready-built recovery images live on the
+[`renoir` branch](https://github.com/wannqn/darwin-renoir/tree/renoir).
+This branch contains the UEFI source only.
 
-## Description
+## Restore source
 
-This Project focuses on Making ARM-Based Devices Boot Operating Systems like Windows or Linux using Custom UEFI Firmware.
+```sh
+git clone --branch silicium-renoir --single-branch --recursive https://github.com/wannqn/darwin-renoir.git Mu-Silicium
+cd Mu-Silicium
+python3 Recovery/prepare.py
+```
 
-## Resources
+`prepare.py` restores the saved local Mu_Basecore patch; a recursive clone alone
+is not enough. Submodules remain pinned to their original revisions.
 
-- [Status](Status.md)
-- [Building](Building.md)
-- [Guides](https://github.com/Project-Silicium/Guides/blob/main/README.md)
-- [Discord Server](https://discord.gg/Dx2QgMx7Sv)
+## Build
 
-## Frequently asked Questions
+```sh
+python3 -m venv venv
+venv/bin/pip install -r pip-requirements.txt
+PATH="$PWD/venv/bin:$PATH" python3 build_uefi.py -d renoir -r RELEASE
+```
 
-### **Is my Device Supported in this Project?**
-- To Check if your Device is Supported, Take a Look at the Status Page Referenced in the Section Above.
+See [recovery details](Recovery/README.md) and the [upstream build guide](Building.md).
+Keep `USE_CUSTOM_DISPLAY_DRIVER=0`; the90 Hz experiment is not working.
+Use `fastboot boot` only. Never flash, erase or repartition.
 
-### **What do I do if my Device isn't Supported in this Project?**
-- We made some Guides that Explain How to Port your Device that are Referenced in the Section Above.
-
-## Credits
-
-[Microsoft](https://github.com/microsoft/) for their [Project Mu](https://microsoft.github.io/mu/) which Powers this Project. <br>
-[WOA-Project](https://github.com/WOA-Project/) for their [mu_andromeda_platforms](https://github.com/WOA-Project/mu_andromeda_platforms/) which is used as Base for this Project. <br>
-[Project Aloha](https://github.com/Project-Aloha/) for their [mu_aloha_platforms](https://github.com/Project-Aloha/mu_aloha_platforms/) which is used as Reference for some SoCs. <br>
-[Open Surface RT](https://openrt.gitbook.io/open-surfacert/) for their Help on Tegra Related Stuff.
-
-[sonic011gamer](https://github.com/sonic011gamer/) and [halal-beef](https://github.com/halal-beef/) for their Amazing Work on Exynos Related Stuff.
-
-## License
-
-All code except drivers in `GPLDrivers` & `GPLApplications` & `GPLLibrary` directories are licensed under BSD-2-Clause. <br />
-GPL Drivers are licensed under `GPLv2` or later license.
+Based on [Project Silicium](https://github.com/Project-Silicium/Mu-Silicium).
+The original README is preserved [here](Recovery/UPSTREAM-README.md).
