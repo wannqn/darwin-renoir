@@ -1,3 +1,6 @@
+> Renoir iOS RAM boot backup: start with [Recovery/README.md](Recovery/README.md).
+> This branch contains the custom XNU loader hooks. No flashing.
+
 # Project Silicium UEFI for ARM64-Based Devices
 
 <!-- ![Banner](https://github.com/Project-Silicium/Mu-Silicium/blob/main/Resources/Pictures/Banner.png) -->
