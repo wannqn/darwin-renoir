@@ -1,0 +1,13 @@
+diff --git a/Platforms/Xiaomi/renoirPkg/renoir.dsc b/Platforms/Xiaomi/renoirPkg/renoir.dsc
+index fceb5f6e..0afca2d6 100644
+--- a/Platforms/Xiaomi/renoirPkg/renoir.dsc
++++ b/Platforms/Xiaomi/renoirPkg/renoir.dsc
+@@ -23,7 +23,7 @@
+   BUILD_TARGETS                  = RELEASE|DEBUG
+   SKUID_IDENTIFIER               = DEFAULT
+   FLASH_DEFINITION               = renoirPkg/renoir.fdf
+-  USE_CUSTOM_DISPLAY_DRIVER      = 0
++  USE_CUSTOM_DISPLAY_DRIVER      = 1
+ 
+ !include CedrosPkg/CedrosPkg.dsc.inc
+ 

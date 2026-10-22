@@ -4,6 +4,8 @@
 /*
 !/.gitignore
 !/README.md
+!/AGENTS.md
+!/CLAUDE.md
 !/docs/
 !/xl
 !/mkpackfs.py
@@ -85,3 +87,7 @@ __pycache__/
 /jb/
 /ssh/
 /build/
+
+# Reproducible Renoir recovery tools, not downloaded archives
+!/recovery/
+/recovery/assets/
