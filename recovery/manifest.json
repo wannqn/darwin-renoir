@@ -1,0 +1,41 @@
+{
+  "repository": "wannqn/darwin-renoir",
+  "tag": "renoir-recovery-20261022",
+  "old_root": "/home/wannq/darwin_kernel/darwin-redwood",
+  "assets": [
+    {
+      "name": "root-share.packfs",
+      "size": 41304064,
+      "sha256": "5325e40d7b53256c0dbdb21173d290cdcade92c3c73cea37dfe2b6be0764d232"
+    },
+    {
+      "name": "system.packfs.part00",
+      "size": 1500000000,
+      "sha256": "562f441cbd90c2c08fc7561a09a4a09266dfbe1e7c25df7981a7427001ea0547"
+    },
+    {
+      "name": "system.packfs.part01",
+      "size": 1319342336,
+      "sha256": "68a4b1c97beeb11ecefabb7ec26ed2b3d5590c3000793b64b251b399dda57fef"
+    },
+    {
+      "name": "renoir-ios-share.bin",
+      "size": 56948216,
+      "sha256": "548859eebf8c27d4ecb4710e330d59e0313780ffce86b1fe0d08e9e17b31fbaf"
+    },
+    {
+      "name": "renoir-firmware.tar.xz",
+      "size": 11517240,
+      "sha256": "c3b9b46b8948ba6527bcbfbfb8c6cef393a1c9d16427a523317ecf0b6531d89c"
+    },
+    {
+      "name": "build-inputs.tar.gz",
+      "size": 636062163,
+      "sha256": "470e059bfb727dfc26e6fd3543d2d9998a0bae272222ff83659f8df3be96af96"
+    }
+  ],
+  "images": {
+    "userland/root.packfs": "5325e40d7b53256c0dbdb21173d290cdcade92c3c73cea37dfe2b6be0764d232",
+    "userland/system.packfs": "976639136d93e19a3be460548a22316765b955eb2158244de226ad0216943d3d"
+  }
+}
