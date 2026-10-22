@@ -4,7 +4,9 @@ Implemented in redwood_camera.c and portable renoir_camera_core.h. Real Renoir
 hardware bring-up receives recognizable S5KGW3 RAW frames. With camera streaming
 explicitly enabled, real main-camera frames now reach Camera.app through
 mediaserverd and the software ISP. Normal camera-disabled boot remains available.
-Photo saving and front-camera preview in Camera.app still need device validation.
+On the preceding camera build, the user also confirmed photo saving/opening the
+thumbnail and live front-camera preview. Those checks must be repeated after
+further userland updates.
 
 ## Device validation, 20 October 2026
 
