@@ -13,7 +13,8 @@ cp $K prebuilt/mach.development.bcm2837
 cp xnuloader/loader.efi prebuilt/loader.efi
 cp userland/hello prebuilt/userland/
 for f in init child stage0 hello_dyn svc_test surf_test rwtouch mg_test cpu_test sound_test libredwood.dylib libredwood-sb.dylib \
-	libredwood-media.dylib libredwood-statusbar.dylib libredwood-app.dylib libredwood-tweaks.dylib RedwoodAudio net_test; do
+	libredwood-media.dylib libredwood-statusbar.dylib libredwood-app.dylib libredwood-tweaks.dylib RedwoodAudio net_test \
+	store_test libredwood-store.dylib libredwood-fairplay.dylib; do
 	cp userland/obj/$f prebuilt/userland/
 done
 if [ "${SKIP_UEFI:-0}" != 1 ] && [ -f $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ]; then
@@ -23,6 +24,6 @@ fi
 {
 	echo "Built $(date '+%Y-%m-%d %H:%M') from this tree."
 	echo
-	sha256sum prebuilt/mach.development.bcm2837 prebuilt/loader.efi prebuilt/userland/* prebuilt/uefi/* 2>/dev/null
+	sha256sum prebuilt/mach.development.bcm2837 prebuilt/loader.efi prebuilt/userland/* prebuilt/uefi/* prebuilt/renoir/* 2>/dev/null
 } > prebuilt/SHA256SUMS
 ls -la prebuilt prebuilt/userland prebuilt/uefi
