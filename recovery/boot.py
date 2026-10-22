@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Boot restored Renoir RAM images. No flashing, erasing or storage commands."""
 from pathlib import Path
-import os, shutil, subprocess, time, struct
+import os, shutil, subprocess, time, struct, argparse
 R=Path(__file__).resolve().parents[1]
+p=argparse.ArgumentParser(description=__doc__)
+p.add_argument('--last-phone-good',action='store_true',help='use the preserved earlier phone-validated kernel/root')
+options=p.parse_args()
+payload='recovery/assets/'+('renoir-phone-good-share.bin' if options.last_phone_good else 'renoir-ios-share.bin')
 fb=os.environ.get('FASTBOOT') or next((str(p) for p in [Path('C:/platform-tools/fastboot.exe'),Path('/mnt/c/platform-tools/fastboot.exe')] if p.is_file()),None) or shutil.which('fastboot')
 if not fb:raise SystemExit('Install platform-tools or set FASTBOOT')
 def file(p):
@@ -14,7 +18,7 @@ def devices():return [line.split()[0] for line in cmd('devices').stdout.splitlin
 def check(serial,key,value):
  q=cmd('getvar',key,serial=serial)
  if (key+': '+value) not in q.stdout+q.stderr:raise SystemExit('Wrong device: expected '+key+' '+value)
-for p in ['userland/system.packfs','recovery/assets/renoir-ios-share.bin','prebuilt/renoir/resident-usb.img']:
+for p in ['userland/system.packfs',payload,'prebuilt/renoir/resident-usb.img']:
  if not (R/p).is_file():raise SystemExit('Run recovery/restore.py first: missing '+p)
 dev=devices()
 if len(dev)!=1:raise SystemExit('Connect exactly one phone in fastboot mode')
@@ -30,7 +34,7 @@ s='xnuloader';check(s,'board','renoir');cmd('oem','ramdisk',serial=s)
 print('Uploading system RAM image (about90 seconds)...',flush=True)
 cmd('stage',file('userland/system.packfs'),serial=s,timeout=240)
 # Refresh the epoch in the XNUP container without recompiling the kernel.
-data=(R/'recovery/assets/renoir-ios-share.bin').read_bytes();out=bytearray(data[:8]);offset=8
+data=(R/payload).read_bytes();out=bytearray(data[:8]);offset=8
 while offset+24<=len(data):
  name,size,reserved=struct.unpack_from('<16sII',data,offset);offset+=24
  body=data[offset:offset+size];offset+=(size+15)&~15

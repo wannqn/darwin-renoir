@@ -32,6 +32,11 @@
       "name": "build-inputs.tar.gz",
       "size": 636062163,
       "sha256": "470e059bfb727dfc26e6fd3543d2d9998a0bae272222ff83659f8df3be96af96"
+    },
+    {
+      "name": "renoir-phone-good-share.bin",
+      "size": 56571400,
+      "sha256": "9394a87b7e2c04d3fa7d43e9c4b62e7bbe350bd90b46760b45c60105a9855cde"
     }
   ],
   "images": {
