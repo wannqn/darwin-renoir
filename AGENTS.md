@@ -6,7 +6,7 @@ never push to upstream unless separately requested.
 
 - Kernel/environment branch: renoir. UEFI source branch: silicium-renoir.
 - Target for this backup: https://github.com/wannqn/darwin-renoir.git only.
-- No force push. Keep commits focused; use descriptive Russian conventional titles.
+- No force push. Keep commits focused; use descriptive English conventional titles.
 - Never publish passwords, access tokens or private keys. Runtime recovery images
   must be built with SHARE=1. Keep firmware separate from personal network config.
 - Phone testing is RAM-only: fastboot boot, resident stage/oem run. Never flash,

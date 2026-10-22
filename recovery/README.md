@@ -1,39 +1,54 @@
-# Восстановление Renoir
+# Renoir recovery
 
-Репозиторий приватный. Нужны Git, GitHub CLI, Python 3.12+, Linux/WSL и около 20 ГБ свободного места. Сначала выполни `gh auth login`.
+This private backup has two source branches: `renoir` and `silicium-renoir`.
+Release: `renoir-recovery-20261022`. Needs Linux/WSL, Python 3.12+, GitHub CLI,
+Git, platform-tools and about20 GB free space.
+
+## Ready-to-run restore
 
 ```sh
-git clone --branch renoir --single-branch https://github.com/wannqn/darwin-renoir.git darwin-renoir
+gh auth login
+git clone --branch renoir --single-branch https://github.com/wannqn/darwin-renoir.git
 cd darwin-renoir
 python3 recovery/restore.py --build-inputs
 ```
 
-Скрипт скачивает семь assets релиза `renoir-recovery-20261022`, проверяет SHA256 и восстанавливает packfs-образы, native-прошивки Renoir и сборочные инструменты. Пароль Wi-Fi, SSH-ключи и токены доступа исключены. Сеть нужно выбрать и настроить в iOS. MAC этого телефона сохранён в загрузочных параметрах: он нужен драйверу.
+The script verifies SHA256 for seven release assets, restores both packfs images,
+native Renoir firmware and build tools, and relocates SDK symlinks.
+Passwords, SSH keys and access tokens are excluded. Select your Wi-Fi network
+and enter its password in iOS. The radio MAC required by this device is preserved.
 
-Переведи телефон в штатный fastboot и запусти:
+Put the phone in **stock fastboot** and run:
 
 ```sh
 python3 recovery/boot.py
+# Or use the preserved earlier phone-tested kernel/root:
+python3 recovery/boot.py --last-phone-good
 ```
 
-Сохранён и предыдущий проверенный на телефоне вариант ядра/root до обновления служб. Если новый вариант не подходит, запусти `python3 recovery/boot.py --last-phone-good`. У него тоже удалён пароль Wi-Fi; это резервный payload, а не обещание новой аппаратной проверки.
+The helper validates the model and uses only `fastboot boot`, RAM uploads and
+`oem run`. It refuses to overwrite a running resident loader. Windows fastboot.exe
+at C:/platform-tools is supported from WSL. Reboot normally to return to Android.
+iOS changes are volatile; this is not an Android data backup.
 
-Нужны platform-tools. Поддерживается Windows fastboot.exe из C:/platform-tools через WSL. Скрипт проверяет модель, выполняет fastboot boot и загружает образы исключительно в RAM. Уже работающий xnuloader сначала перезапусти в штатный fastboot. После обычной перезагрузки возвращается Android; изменения внутри RAM-iOS не сохраняются.
+## Custom UEFI source
 
-## Исходники UEFI
-
-Из корня ядра:
+From the kernel clone:
 
 ```sh
 git clone --branch silicium-renoir --single-branch --recursive https://github.com/wannqn/darwin-renoir.git Mu-Silicium
 python3 Mu-Silicium/Recovery/prepare.py
 ```
 
-prepare.py восстанавливает локальный патч Mu_Basecore. Без этого один clone --recursive не возвращает все изменения. Готовый загрузчик уже сохранён в prebuilt/renoir; для обычного запуска пересборка UEFI не нужна. Экспериментальный патч 90 Гц не включён, сохранён отдельно.
+The helper reapplies local Mu_Basecore changes missing from an ordinary recursive
+clone. A ready-built loader is already in prebuilt/renoir. The failed90 Hz
+experiment is archived separately and is not enabled in the working configuration.
 
-## Пересборка
+## Rebuilding
 
-Архив build-inputs содержит Theos SDK/toolchain, зависимости XNU и QEMU; абсолютные symlink SDK перепривязываются к новой папке. Системные Linux-пакеты нужны заново: clang, lld, llvm, make, cc/c++, git, curl, Python, 7z, flex, bison, autoconf, automake, nasm, pkg-config. Используй Linux-файловую систему WSL.
+Build inputs include Theos SDK/toolchain, XNU host tools/libraries and QEMU.
+Install Linux packages as needed: clang, lld, llvm, make, cc/c++, git, curl, Python,
+7z, flex, bison, autoconf, automake, nasm, pkg-config. Use the WSL Linux filesystem.
 
 ```sh
 bash xnu/apply.sh
@@ -41,13 +56,19 @@ bash xnu/apply.sh
 bash xnuloader/build.sh renoir
 ```
 
-Для пересборки userland файлы iOS можно снова скачать из Apple IPSW командой `bash ios165/fetch.sh`. Для обычного запуска это не требуется: готовые packfs сохранены в релизе. Перед GL-сборкой заново собери Mesa (`bash tools/mk-mesa.sh`), затем:
+To rebuild userland, fetch original Apple inputs again with `bash ios165/fetch.sh`;
+ready-built packfs images do not require that download. Rebuild Mesa first:
 
 ```sh
+bash tools/mk-mesa.sh
 GL=1 REST=1 WIFID=1 SHARE=1 RC_JOBS=rc.jobs.renoir bash userland/build.sh
 QEMU_RAM_GB=6 CMDLINE=-v bash qemu/run-ios.sh 600
 ```
 
-Последние изменения проверены сборками и рабочим столом/Settings в QEMU, но ещё не повторной загрузкой телефона. QEMU не проверяет физические драйверы Renoir.
+Latest source changes passed builds and QEMU UI tests, not a new hardware test.
+QEMU does not validate physical Renoir drivers. The earlier phone-tested payload
+is preserved as a fallback, with its Wi-Fi password removed.
 
-Перед удалением локальной папки проверь обе ветки, семь assets и SHA256SUMS в релизе. Сохрани доступ к GitHub: токен в архивы не входит. Исходный IPSW, распакованная iOS, старые RAW/логи и сборочные кэши не архивируются. Личные данные Android этот комплект не резервирует.
+Before deleting local work, verify both branches and all seven assets plus
+SHA256SUMS. Keep access to your GitHub account. Old logs/RAW captures, Apple IPSW
+source inputs and build caches are not archived.
