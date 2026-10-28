@@ -51,19 +51,6 @@ void redwood_audio_set_sink(const char *name, redwood_audio_sink_t sink);
 bool redwood_audio_volume(uint32_t *below, bool *muted, uint32_t *generation);
 void redwood_audio_init(void);
 void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
-void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
-
-/*
- * The phone's speakers (bsd/dev/redwood_speaker.c): its two Awinic amplifiers, set up as
- * Android's driver sets them up, from Android's own configuration file (see there).
- */
-bool redwood_speaker_prepare(const uint8_t *acf, uint64_t size);       /* found, reset, configured: powered down, muted */
-bool redwood_speaker_start(void);       /* powered up and unmuted at the lowest volume: only while the I2S clock runs */
-bool redwood_speaker_volume(uint32_t below, uint32_t step_ms); /* below Android's level, in eighths of a dB; 6 dB a step */
-bool redwood_speaker_healthy(void);     /* no fault reported; on one, both are powered down at once */
-void redwood_speaker_stop(void);        /* faded out, muted, powered down, in Android's order */
-void redwood_speaker_quiesce(void);     /* powered down at once, without sleeping: on a panic's way out */
-
 /*
  * The audio DSP's services, for the sound's path (bsd/dev/redwood_adsp.c, bsd/dev/redwood_sound.c).
  * redwood_adsp_apr() sends one APR packet to a service of the DSP (AFE 4, ASM 7, ADM 8) with the

@@ -44,24 +44,17 @@
 # when the last upload was not from this copy. The record starts empty -- an upload by a copy without
 # this change leaves none -- and `run` says so rather than assuming.
 cd "$(dirname "$(readlink -f "$0")")" || exit 1
-XL_DEVICE=${XL_DEVICE:-redwood}
-case "$XL_DEVICE" in redwood|renoir) ;; *) echo "xl: XL_DEVICE must be redwood or renoir" >&2; exit 1 ;; esac
+XL_DEVICE=${XL_DEVICE:-renoir}
+case "$XL_DEVICE" in renoir) ;; *) echo "xl: XL_DEVICE must be renoir" >&2; exit 1 ;; esac
 # the kernel and the loader built here, or else the ones that come with the repository
 K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
-[ -f $K ] || K=prebuilt/mach.development.bcm2837
-L=xnuloader/loader.efi
-[ -f $L ] || L=prebuilt/loader.efi
-if [ "$XL_DEVICE" = renoir ]; then
-	L=xnuloader/loader-renoir.efi
-	[ -f "$L" ] && [[ "$K" != prebuilt/* ]] || {
-		echo "xl: renoir needs xnuloader/build.sh renoir and a rebuilt XNU kernel; see docs/renoir.md" >&2
-		exit 1
-	}
-fi
+[ -f "$K" ] || K=prebuilt/mach.development.bcm2837
+L=xnuloader/loader-renoir.efi
+[ -f "$L" ] || L=prebuilt/renoir/loader-renoir.efi
 mkdir -p logs
 # There is one phone, whichever working copy (tools/new-workspace.sh) talks to it: the locks are
 # outside all of them.
-PHONE=${XDG_RUNTIME_DIR:-/tmp}/darwin-redwood-phone
+PHONE=${XDG_RUNTIME_DIR:-/tmp}/darwin-renoir-phone
 
 # one fastboot at a time (a run in one terminal, "xl screenshot" in another): each takes the lock for itself
 fb() { flock -w 90 $PHONE.lock timeout "${FB_TIMEOUT:-10}" fastboot "$@" 2>&1; }

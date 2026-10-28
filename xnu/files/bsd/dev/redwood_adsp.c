@@ -3176,7 +3176,6 @@ redwood_adsp_stop(void)
 {
 	battmgr_stop();
 	redwood_sound_dsp_down();               /* the amplifiers, the stream and the port first, while the DSP still listens */
-	redwood_mic_dsp_down();                 /* and what the microphones' path has asked for */
 	lck_mtx_lock(&dsp_lock);
 	if (dsp_started) {
 		unsigned services = 0;
@@ -3246,7 +3245,6 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 		    "root's waited for included): node %u, %u services; it stays on\n", (now_us() - began) / 1000, qrtr_peer, services);
 		renoir_tfa_dsp_up();            /* Renoir config-only diagnostic; no amplifier enable. */
 		redwood_sound_dsp_up();         /* (boot-arg sound=N: the speakers' path, redwood_sound.c) */
-		redwood_mic_dsp_up();           /* (boot-arg mic=N: the microphones' path, redwood_mic.c) */
 		battmgr_start();                /* (how the battery is, from the DSP; battmgr=0: not asked) */
 	} else {
 		tell("adsp: THE AUDIO DSP DID NOT COME UP: step %u failed (%s); see the kernel's own log for the steps\n", step + 1,

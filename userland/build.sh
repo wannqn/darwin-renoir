@@ -162,7 +162,7 @@ rm -rf root
 mkdir -p root/sbin root/bin root/etc root/share root/LaunchDaemons
 cp obj/init root/sbin/init
 cp obj/child root/bin/child
-echo "Darwin on redwood: image built $(date '+%Y-%m-%d %H:%M')" > root/etc/motd
+echo "Darwin on renoir: image built $(date '+%Y-%m-%d %H:%M')" > root/etc/motd
 # 300000 bytes, byte i = (i*31 + (i>>8)) & 0xff; init verifies it through read() and mmap()
 python3 -c "import sys; sys.stdout.buffer.write(bytes((i*31 + (i>>8)) & 0xff for i in range(300000)))" > root/share/pattern.bin
 # EXTRA_SHARE: whole directories of data for a one-off diagnostic, each under its own name. Here and
@@ -360,7 +360,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		done
 	fi
 	cp ${RC:-rc.launchd} root/etc/rc
-	cp ${RC_JOBS:-rc.jobs} root/etc/rc.jobs
+	cp ${RC_JOBS:-rc.jobs.renoir} root/etc/rc.jobs
 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
 	# lines about its own business in the first minutes and pushes everything else out of the
 	# kernel's log; the daemons keep their own standard error on the console all the same.
@@ -399,36 +399,12 @@ rm -f root/fw/network
 if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then
 	install -m 0600 ../fw-wifi/network root/fw/network
 fi
-# ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
-# (bsd/dev/redwood_haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
-if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
-	mkdir -p root/fw
-	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
-fi
-# ... and the cameras' register tables (bsd/dev/redwood_camera.c, cam=2 and up), made by tools/camsensor.py out of
-# the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
-# redwood_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the
-# repository): camera-<sensor>.tab
-for module in ../fw-camera/com.qti.sensormodule.redwood_*.bin; do
-	[ -f "$module" ] || continue
-	sensor=$(basename "$module" .bin | sed 's/^com\.qti\.sensormodule\.redwood_[a-z]*_\([a-z0-9]*\)_.*/\1/')
-	mkdir -p root/fw
-	../tools/camsensor.py "$module" "root/fw/camera-$sensor.tab" >/dev/null
-done
 # Renoir tables have a board prefix; the camera driver never substitutes Redwood tables.
 for module in ../fw-camera/renoir/com.qti.sensormodule.renoir_*.bin; do
     [ -f "$module" ] || continue
     sensor=$(basename "$module" .bin | sed 's/^com\.qti\.sensormodule\.renoir_[a-z]*_\([a-z0-9]*\)_.*/\1/')
     mkdir -p root/fw
     ../tools/camsensor.py "$module" "root/fw/camera-renoir-$sensor.tab" >/dev/null
-done
-# ... and their colour tuning (libredwood-media's processor, src/camera_isp.c), made by tools/camtuning.py out of the
-# cameras' tuning files beside them, com.qti.tuned.redwood_<maker>_<sensor>_<camera>.bin: camera-<sensor>.isp
-for tuned in ../fw-camera/com.qti.tuned.redwood_*.bin; do
-	[ -f "$tuned" ] || continue
-	sensor=$(basename "$tuned" .bin | sed 's/^com\.qti\.tuned\.redwood_[a-z]*_\([a-z0-9]*\)_.*/\1/')
-	mkdir -p root/fw
-	../tools/camtuning.py "$tuned" "root/fw/camera-$sensor.isp" >/dev/null
 done
 # Renoir colour tuning from the corresponding installed vendor modules.
 for tuned in ../fw-camera/renoir/com.qti.tuned.renoir_*.bin; do
@@ -497,16 +473,6 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	cp obj/stage0 sysroot/sbin/launchd
 	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
 	# it once the root is mounted (bsd/dev/redwood_adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
-	if [ -f ../fw-audio/adsp.mdt ]; then
-		mkdir -p sysroot/fw
-		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
-	fi
-	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/redwood_speaker.c,
-	# for sound=3): Android's own register values, which are not in the repository either
-	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
-		mkdir -p sysroot/fw
-		cp ../fw-audio/aw882xx_acf.bin sysroot/fw/
-	fi
 	# Renoir uses NXP TFA9873 amplifiers; never substitute Redwood's Awinic profile.
 	if [ -f ../fw-audio/renoir/adsp.mdt ]; then
 		mkdir -p sysroot/fw-audio-renoir

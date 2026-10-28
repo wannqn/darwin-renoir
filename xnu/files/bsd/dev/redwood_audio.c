@@ -347,9 +347,7 @@ redwood_audio_init(void)
 	report_call = thread_call_allocate(audio_report, NULL);
 	audio_recording_init();
 	redwood_virtio_sound_init();
-	redwood_speaker_init();
 	renoir_tfa_init();
 	redwood_haptic_init();
-	redwood_torch_init();
 	redwood_camera_init();
 }

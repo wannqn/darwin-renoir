@@ -44,7 +44,6 @@ void redwood_rpmh_lock(void);          /* APPS DRV2/TCS0 transaction; thread con
 void redwood_rpmh_unlock(void);
 void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
 void renoir_fts_init(void);             /* touchscreen=1 on renoir: FocalTech FT3658U */
-void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
 void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 void redwood_battery_init(void);        /* boot-arg battery=1: Qualcomm UEFI charger state shared by xnuloader */
 int redwood_battery_temperature(void);  /* the battery's temperature in C, -273 while it is not known */
@@ -84,9 +83,9 @@ int redwood_wifi_say(const char *format, ...) __printflike(1, 2);      /* a line
 int redwood_wifi_tell(const char *format, ...) __printflike(1, 2);     /* ... one that is said even with wifi=1 */
 uint32_t redwood_wifi_option(const char *name);                         /* a boot-arg's number, or what wifi=1 stands for */
 const uint8_t *redwood_wifi_file(const char *name, uint64_t *size);     /* a file of fw/ in the small image, in place */
-bool redwood_wlfw_exchange(uint32_t step);                              /* step 15 of wifi_step=N: redwood_wlfw.c */
-bool redwood_wlfw_registers(uint64_t *address, uint32_t *size, bool *mission); /* ... and what it learnt for step 16 */
-void redwood_wlfw_stop(uint32_t step);                                  /* ... and its end, before the DSP is stopped */
+static inline bool redwood_wlfw_exchange(__unused uint32_t step) { return false; }
+static inline bool redwood_wlfw_registers(__unused uint64_t *address, __unused uint32_t *size, __unused bool *mission) { return false; }
+static inline void redwood_wlfw_stop(__unused uint32_t step) {}
 void redwood_wifi_quiesce(void);        /* on the way back to the loader: the Wi-Fi DSP, if it still runs, shut down */
 /* ath11k's object and the kernel's side of it (bsd/dev/redwood_lx.c), and what that asks of the phone's radio */
 int redwood_lx_start(void);             /* the driver brought up on the radio as far as it is built: 0 or an errno */

@@ -63,27 +63,12 @@ void renoir_tfa_amp_release(void);
 bool renoir_tfa_amp_volume(uint32_t below,unsigned fade_ms);
 void renoir_tfa_scale_pcm(int16_t *samples,unsigned frames);
 void renoir_tfa_amp_quiesce(void);
-void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 void redwood_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (bsd/dev/redwood_haptic.c) */
 void redwood_haptic_quiesce(void);      /* its chip back into reset: at the run's end and on a panic's way out */
 void redwood_haptic_pretend(uint32_t peak); /* a test's stand-in for iOS's waveform: as if a write of this loudness came */
-void redwood_torch_init(void);          /* boot-arg torch=N: the phone's flashlight (bsd/dev/redwood_torch.c) */
-void redwood_torch_quiesce(void);       /* the light off: at the run's end and on a panic's way out */
 void redwood_camera_init(void);         /* boot-arg cam=N: the phone's cameras (bsd/dev/redwood_camera.c) */
 void redwood_camera_quiesce(void);      /* whatever of them was switched on, off: at the run's end and on a panic's way out */
 
-/*
- * The phone's speakers (bsd/dev/redwood_speaker.c): its two Awinic amplifiers, set up as
- * Android's driver sets them up, from Android's own configuration file (see there).
- */
-bool redwood_speaker_prepare(const uint8_t *acf, uint64_t size);       /* found, reset, configured: powered down, muted */
-bool redwood_speaker_start(void);       /* powered up and unmuted at the lowest volume: only while the I2S clock runs */
-bool redwood_speaker_volume(uint32_t below, uint32_t step_ms); /* below Android's level, in eighths of a dB; 6 dB a step */
-bool redwood_speaker_healthy(void);     /* no fault reported; on one, both are powered down at once */
-void redwood_speaker_stop(void);        /* faded out, muted, powered down, in Android's order */
-void redwood_speaker_quiesce(void);     /* powered down at once, without sleeping: on a panic's way out */
-/* the amplifiers' own temperature and battery voltage read (every second while they play): the reduction they call for */
-uint32_t redwood_speaker_monitor(bool tell);
 
 /*
  * The speakers' guard (bsd/dev/redwood_guard.c): what the samples go through in the feeder on their
@@ -140,8 +125,6 @@ void redwood_audio_dsp_memory_put(void);
 void redwood_adsp_apr_events_second(redwood_apr_events_t handler);
 /* boot-arg rec_sound_mic=1: the recording (rec_sound=N) has what the microphone hears (given with redwood_audio_record_fed()) */
 bool redwood_audio_recording_mic(void);
-void redwood_mic_dsp_up(void);          /* the DSP's audio services are up (adsp=1): boot-arg mic=N begins */
-void redwood_mic_dsp_down(void);        /* before the DSP is shut down at the run's end: what the microphones' path asked for given back */
 #endif
 
 #endif /* _SYS_REDWOOD_AUDIO_H_ */

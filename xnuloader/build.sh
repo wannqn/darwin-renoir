@@ -2,11 +2,10 @@
 # Build the XNU loader as a freestanding AArch64 UEFI application.
 set -e
 cd "$(dirname "$0")"
-DEVICE=${1:-redwood}
+DEVICE=${1:-renoir}
 case "$DEVICE" in
-  redwood) TARGET_FLAGS=; OUTPUT=loader ;;
   renoir) TARGET_FLAGS=-DXNU_PHONE_RENOIR; OUTPUT=loader-renoir ;;
-  *) echo "usage: $0 [redwood|renoir]" >&2; exit 1 ;;
+  *) echo "usage: $0 [renoir]" >&2; exit 1 ;;
 esac
 clang --target=aarch64-unknown-windows -ffreestanding -fno-builtin -fno-stack-protector -fshort-wchar \
   -mgeneral-regs-only -O1 -Wall -Wextra -Wno-unused-parameter $TARGET_FLAGS -c loader.c -o "$OUTPUT.obj"

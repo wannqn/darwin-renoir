@@ -237,7 +237,6 @@ redwood_input_init(void)
 	exit_call = thread_call_allocate(exit_hold_elapsed, NULL);
 	redwood_cpufreq_init();
 	redwood_virtio_input_init();
-	redwood_goodix_init();
 	renoir_fts_init();
 	redwood_buttons_init();
 	redwood_battery_init();

@@ -98,13 +98,13 @@ static uint32_t level, seconds = 3, below = 240, pause_ms = 1000, gain = REDWOOD
 static uint32_t guard_as = UINT32_MAX;  /* boot-arg sound_guard_as=N: the guard reckons the amplifiers at most N under (a test) */
 static char last_write[96] = "nothing written";
 
-static bool sound_speaker_prepare(const uint8_t *data,uint64_t size) {return sound_renoir ? renoir_tfa_amp_prepare() : redwood_speaker_prepare(data,size);}
-static bool sound_speaker_start(void) {return sound_renoir ? renoir_tfa_amp_start() : redwood_speaker_start();}
-static bool sound_speaker_healthy(void) {return sound_renoir ? renoir_tfa_amp_healthy() : redwood_speaker_healthy();}
-static void sound_speaker_stop(void) {if(sound_renoir)renoir_tfa_amp_stop();else redwood_speaker_stop();}
-static bool sound_speaker_volume(uint32_t value,uint32_t fade) {return sound_renoir ? renoir_tfa_amp_volume(value,fade) : redwood_speaker_volume(value,fade);}
-static uint32_t sound_speaker_monitor(bool tell) {return sound_renoir ? 0 : redwood_speaker_monitor(tell);}
-static void sound_speaker_quiesce(void) {if(sound_renoir)renoir_tfa_amp_quiesce();else redwood_speaker_quiesce();}
+static bool sound_speaker_prepare(__unused const uint8_t *data,__unused uint64_t size) {return renoir_tfa_amp_prepare();}
+static bool sound_speaker_start(void) {return renoir_tfa_amp_start();}
+static bool sound_speaker_healthy(void) {return renoir_tfa_amp_healthy();}
+static void sound_speaker_stop(void) {renoir_tfa_amp_stop();}
+static bool sound_speaker_volume(uint32_t value,uint32_t fade) {return renoir_tfa_amp_volume(value,fade);}
+static uint32_t sound_speaker_monitor(__unused bool tell) {return 0;}
+static void sound_speaker_quiesce(void) {renoir_tfa_amp_quiesce();}
 
 /* ---- what is said: to the loader's log as well, as it happens ---------------------------------------- */
 
