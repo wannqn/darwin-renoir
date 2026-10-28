@@ -26,14 +26,20 @@ python3 recovery/restore.py --build-inputs
 python3 recovery/boot.py
 ```
 
-For the preserved earlier phone-tested kernel/root, use `recovery/boot.py --last-phone-good`.
+The script asks for your handset's device Wi-Fi MAC from Android before booting.
+**Colons are optional:** enter `AABBCCDDEEFF` or `AA:BB:CC:DD:EE:FF`.
+You can also supply it with `--wifi-mac AA:BB:CC:DD:EE:FF`. The helper uses the
+current prebuilt kernel. Add `--last-phone-good` to explicitly select the earlier
+archived kernel/root.
 Wi-Fi passwords and private keys are excluded; configure Wi-Fi manually after boot.
 
 ## Status
 
 Earlier phone tests confirmed UI/touch, GPU, Wi-Fi, speakers, battery reporting,
-main/front camera preview, photos and autofocus. Latest upstream integration
-through `e7a0a25` passed builds and basic QEMU UI tests; it still needs phone regression.
+main/front camera preview, photos and autofocus. Current Wi-Fi fixes are confirmed
+on a second Renoir: 2.4/5 GHz scans, open and WPA2 joining, and Safari internet access.
+The final kernel was tested through resident RAM reloads; complete cold-boot and
+other upstream integration regressions remain pending.
 Bluetooth, cellular, APFS/persistent boot and 90 Hz are not ready.
 
 [Recovery & rebuild guide](recovery/README.md) · [Port details](docs/renoir.md) ·

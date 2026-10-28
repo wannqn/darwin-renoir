@@ -9,4 +9,8 @@ again for rebuilding userland; they are not needed for booting the saved images.
 Start with recovery/README.md. This is RAM boot only. Latest changes were built
 and QEMU-tested; the new combination has not been revalidated on the phone.
 The earlier phone-validated kernel/root is preserved as a sanitized fallback:
-use recovery/boot.py --last-phone-good.
+use recovery/boot.py --last-phone-good --wifi-mac YOUR_DEVICE_MAC.
+
+The current boot helper prompts for a device MAC, or accepts --wifi-mac, and
+normally substitutes the updated prebuilt kernel. --last-phone-good explicitly
+retains the earlier archived kernel.

@@ -17,4 +17,6 @@ under XNU's APSL. This private repository is the user's device recovery backup.
 build scripts consume these directories directly and regenerate camera tables.
 No additional firmware download or Android extraction is needed after cloning.
 Network passwords, the per-device `fw-wifi/mac` file and private keys are excluded.
-Set `wifi_mac` for the phone being tested when booting; it is not firmware.
+Run `python3 recovery/boot.py` and enter your device MAC when prompted, or supply
+`--wifi-mac YOUR_DEVICE_MAC`. This sets `wifi_mac` for the handset being tested.
+It is not firmware.

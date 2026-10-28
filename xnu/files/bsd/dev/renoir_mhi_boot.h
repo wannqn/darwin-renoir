@@ -6,6 +6,40 @@
 #define RENOIR_BHI_SIZE 0x80000u
 #include "renoir_mhi_protocol.h"
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
+
+/* Early firmware memory: normal probe 27 needs the full image, control rings
+ * and 8 MiB of target memory in one physical span. Reserve before userland
+ * fragments RAM; no device or SMMU mapping is installed until prepare. Kept
+ * separately because renoir_bhi_host resets the per-session structure. */
+static vm_offset_t renoir_bhi_early_buffer;
+static uint32_t renoir_bhi_early_size;
+
+static void
+renoir_bhi_reserve(uint32_t firmware_size)
+{
+	if (renoir_bhi_early_buffer || firmware_size<RENOIR_BHI_SIZE || firmware_size>0x800000) { return; }
+	uint32_t size=round_page(firmware_size)+0x10000+0x800000;
+	vm_offset_t buffer=0;
+	if (kmem_alloc_contig(kernel_map,&buffer,size,0,0,0,
+	    KMA_KOBJECT|KMA_ZERO|KMA_DATA,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
+		say("renoir-wifi: early firmware buffer reservation failed\n");return;
+	}
+	renoir_bhi_early_buffer=buffer;renoir_bhi_early_size=size;
+	say("renoir-wifi: reserved %u KiB firmware buffer before userland; DMA not enabled\n",size/1024);
+}
+
+static bool
+renoir_bhi_allocate(uint32_t size, vm_offset_t *buffer)
+{
+	if (renoir_bhi_early_buffer && size==renoir_bhi_early_size) {
+		*buffer=renoir_bhi_early_buffer;
+		renoir_bhi_early_buffer=0;renoir_bhi_early_size=0;
+		say("renoir-wifi: using early firmware buffer\n");return true;
+	}
+	return kmem_alloc_contig(kernel_map,buffer,size,0,0,0,
+	    KMA_KOBJECT|KMA_ZERO|KMA_DATA,VM_KERN_MEMORY_IOKIT)==KERN_SUCCESS;
+}
+
 static struct {
 	bool context_saved, sid_saved, active;
 	vm_offset_t buffer, parf, tlmm;
@@ -112,8 +146,7 @@ renoir_bhi_prepare_locked(const uint8_t *firmware, uint32_t size, bool full)
 	if (rd(apps_smmu_context.base+SMMU_CB_FSR)&SMMU_FSR_ALL) { return false; }
 	renoir_bhi.firmware_size=full ? size : RENOIR_BHI_SIZE;
 	renoir_bhi.allocation=round_page(renoir_bhi.firmware_size)+(full ? 0x10000 : 0)+renoir_bhi.target_extra;
-	if (kmem_alloc_contig(kernel_map,&renoir_bhi.buffer,renoir_bhi.allocation,0,0,0,
-	    KMA_KOBJECT|KMA_ZERO|KMA_DATA,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
+	if (!renoir_bhi_allocate(renoir_bhi.allocation,&renoir_bhi.buffer)) {
 		say("renoir-wifi: BHI has no contiguous firmware buffer\n"); return false;
 	}
 	uint64_t physical=kvtophys(renoir_bhi.buffer);

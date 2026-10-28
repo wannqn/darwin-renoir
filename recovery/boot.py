@@ -1,25 +1,54 @@
 #!/usr/bin/env python3
 """Boot restored Renoir RAM images. No flashing, erasing or storage commands."""
 from pathlib import Path
-import os, shutil, subprocess, time, struct, argparse
+import os, shutil, subprocess, time, argparse, re
+from payload import prepare, validate_mac
 R=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('--last-phone-good',action='store_true',help='use the preserved earlier phone-validated kernel/root')
+def mac_argument(value):
+ try:return validate_mac(value)
+ except ValueError as error:raise argparse.ArgumentTypeError(str(error)) from error
+p.add_argument('--wifi-mac',type=mac_argument,metavar='MAC',help='this handset\'s device Wi-Fi MAC; colons optional; prompted if omitted')
+images=p.add_mutually_exclusive_group()
+images.add_argument('--last-phone-good',action='store_true',help='use the archived earlier kernel/root instead of the current Wi-Fi fixes')
+images.add_argument('--kernel',type=Path,help='override the current prebuilt kernel with a rebuilt kernel')
 options=p.parse_args()
+while options.wifi_mac is None:
+ try:options.wifi_mac=validate_mac(input('Enter this Renoir\'s Wi-Fi MAC. (colons optional: AABBCCDDEEFF or AA:BB:CC:DD:EE:FF) Do NOT be lazy and reuse another MAC, boot a ROM and note your Renoir\'s MAC: '))
+ except ValueError as error:print(str(error)+'. Please try again.',flush=True)
+ except EOFError:p.error('A device Wi-Fi MAC is required; enter it at the prompt or pass --wifi-mac')
+ except KeyboardInterrupt:raise SystemExit('\nBoot cancelled before contacting the phone.') from None
 payload='recovery/assets/'+('renoir-phone-good-share.bin' if options.last_phone_good else 'renoir-ios-share.bin')
 fb=os.environ.get('FASTBOOT') or next((str(p) for p in [Path('C:/platform-tools/fastboot.exe'),Path('/mnt/c/platform-tools/fastboot.exe')] if p.is_file()),None) or shutil.which('fastboot')
 if not fb:raise SystemExit('Install platform-tools or set FASTBOOT')
 def file(p):
  p=str(R/p)
  return subprocess.check_output(['wslpath','-w',p],text=True).strip() if fb.endswith('.exe') and os.name!='nt' else p
-def cmd(*args,serial=None,timeout=30):
- return subprocess.run([fb]+(['-s',serial] if serial else [])+list(args),capture_output=True,text=True,timeout=timeout,check=True)
-def devices():return [line.split()[0] for line in cmd('devices').stdout.splitlines() if line.strip()]
+def cmd(*args,serial=None,timeout=30,live=False):
+ command=[fb]+(['-s',serial] if serial else [])+list(args)
+ try:
+  return subprocess.run(command,capture_output=not live,text=True,timeout=timeout,check=True)
+ except subprocess.CalledProcessError as error:
+  detail='\n'.join(part.strip() for part in (error.stdout,error.stderr) if part and part.strip())
+  raise SystemExit('fastboot '+args[0]+' failed (exit '+str(error.returncode)+').\n'+
+                   (detail or 'See the fastboot error printed above. No kernel was started by this failed command.')) from None
+ except subprocess.TimeoutExpired:
+  raise SystemExit('fastboot '+args[0]+' timed out after '+str(timeout)+' seconds. '
+                   'The RAM boot did not complete; check the USB connection and retry from stock fastboot.') from None
+def devices():return [parts[0] for line in cmd('devices').stdout.splitlines() if len(parts:=line.split())>=2 and parts[1]=='fastboot']
 def check(serial,key,value):
  q=cmd('getvar',key,serial=serial)
- if (key+': '+value) not in q.stdout+q.stderr:raise SystemExit('Wrong device: expected '+key+' '+value)
+ match=re.search(r'(?m)^\s*(?:\(bootloader\)\s*)?'+re.escape(key)+r':\s*(\S+)\s*$',q.stdout+q.stderr)
+ if match is None or match[1]!=value:raise SystemExit('Wrong device: expected '+key+' '+value)
 for p in ['userland/system.packfs',payload,'prebuilt/renoir/resident-usb.img']:
  if not (R/p).is_file():raise SystemExit('Run recovery/restore.py first: missing '+p)
+# Validate local inputs before changing the phone's boot state.
+try:
+ mac=options.wifi_mac
+ kernel_path=options.kernel or R/'prebuilt/mach.development.bcm2837'
+ kernel=None if options.last_phone_good else kernel_path.read_bytes()
+ data=prepare((R/payload).read_bytes(),time.time(),wifi_mac=mac,kernel=kernel)
+except (OSError,ValueError) as error:raise SystemExit(str(error))
 dev=devices()
 if len(dev)!=1:raise SystemExit('Connect exactly one phone in fastboot mode')
 s=dev[0]
@@ -31,17 +60,11 @@ if s!='xnuloader':
   time.sleep(1)
  else:raise SystemExit('Resident loader did not appear; do not flash anything')
 s='xnuloader';check(s,'board','renoir');cmd('oem','ramdisk',serial=s)
-print('Uploading system RAM image (about90 seconds)...',flush=True)
-cmd('stage',file('userland/system.packfs'),serial=s,timeout=240)
-# Refresh the epoch in the XNUP container without recompiling the kernel.
-data=(R/payload).read_bytes();out=bytearray(data[:8]);offset=8
-while offset+24<=len(data):
- name,size,reserved=struct.unpack_from('<16sII',data,offset);offset+=24
- body=data[offset:offset+size];offset+=(size+15)&~15
- if name.rstrip(b'\0')==b'cmdline':
-  words=body.rstrip(b'\0').decode().split();words=[w for w in words if not w.startswith('epoch=')]
-  body=(' '.join(words+['epoch='+str(int(time.time()))])).encode()+b'\0'
- out+=struct.pack('<16sII',name,len(body),reserved)+body+b'\0'*((-len(body))%16)
-(R/'recovery/assets/run-current.bin').write_bytes(out)
-cmd('stage',file('recovery/assets/run-current.bin'),serial=s,timeout=60)
+print(f'Uploading system RAM image ({(R/"userland/system.packfs").stat().st_size/1e9:.2f} GB; fastboot progress follows)...',flush=True)
+cmd('stage',file('userland/system.packfs'),serial=s,timeout=900,live=True)
+# Refresh time after the large system upload; keep archived release assets intact.
+data=prepare(data,time.time())
+(R/'recovery/assets/run-current.bin').write_bytes(data)
+print('Uploading kernel/root payload...',flush=True)
+cmd('stage',file('recovery/assets/run-current.bin'),serial=s,timeout=180,live=True)
 cmd('oem','run',serial=s);print('iOS started from RAM. No partition was flashed or erased.')

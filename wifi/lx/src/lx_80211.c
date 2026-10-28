@@ -99,6 +99,7 @@ struct lx_radio {
 	struct cfg80211_bss bss;		/* what the driver may ask of the access point's beacon */
 	struct cfg80211_bss_ies bss_elements;
 	volatile int answer;
+	uint8_t answer_frame;                     /* response subtype for the current management exchange; under lx_os_lock */
 	uint16_t answer_status, aid;
 	unsigned answer_length;
 	uint8_t answer_elements[ELEMENTS_MOST];	/* of the association response */
@@ -724,6 +725,57 @@ management(struct lx_radio *radio, uint8_t *frame, unsigned kind)
 	return (frame + 24);
 }
 
+/* Bounded opt-in header diagnostics: no packet payloads, names or keys. */
+static unsigned
+packet_sum(const uint8_t *bytes, unsigned size, unsigned sum)
+{
+	while (size>=2) { sum+=((unsigned)bytes[0]<<8)|bytes[1];bytes+=2;size-=2; }
+	if (size) { sum+=(unsigned)bytes[0]<<8; }
+	while (sum>>16) { sum=(sum&65535)+(sum>>16); }
+	return sum;
+}
+
+static void
+ethernet_trace(struct lx_radio *radio, const uint8_t *frame, unsigned length, bool transmit)
+{
+	static unsigned said[2];
+	unsigned direction=transmit ? 1 : 0;
+	if (!lx_os_option("wifi_trace") || length<14 || said[direction]>=64) { return; }
+	said[direction]++;
+	unsigned type=(unsigned)frame[12]<<8|frame[13], source=0, destination=0, bootp=0;
+	unsigned ip_ok=0,udp_ok=0,dhcp_type=0,chaddr=0,client_id=2,broadcast=0;
+	if (type==0x0800 && length>=34 && (frame[14]>>4)==4) {
+		unsigned ihl=(frame[14]&15)*4;
+		if (ihl>=20 && length>=14+ihl+8 && frame[23]==17 && !(frame[20]&0x1f) && !frame[21]) {
+			const uint8_t *udp=frame+14+ihl;
+			unsigned udp_size=(unsigned)udp[4]<<8|udp[5];
+			ip_ok=packet_sum(frame+14,ihl,0)==65535;
+			source=(unsigned)udp[0]<<8|udp[1];destination=(unsigned)udp[2]<<8|udp[3];
+			if (udp_size>=8 && udp_size<=length-14-ihl) {
+				udp_ok=(!udp[6] && !udp[7]) || packet_sum(udp,udp_size,packet_sum(frame+26,8,17+udp_size))==65535;
+				if (udp_size>=8+44 && ((source==68 && destination==67) || (source==67 && destination==68))) {
+					const uint8_t *b=udp+8;unsigned size=udp_size-8;
+					bootp=b[0];broadcast=!!(b[10]&0x80);
+					chaddr=radio->vif && b[1]==1 && b[2]==6 && !memcmp(b+28,radio->vif->addr,6);
+					if (size>=240 && !memcmp(b+236,"\x63\x82\x53\x63",4)) {
+						for (unsigned at=240;at<size;) {
+							unsigned tag=b[at++];if(tag==255)break;if(!tag)continue;
+							if(at==size || b[at]>size-at-1)break;
+							unsigned n=b[at++];
+							if(tag==53 && n==1)dhcp_type=b[at];
+							if(tag==61 && n==7 && b[at]==1)client_id=radio->vif && !memcmp(b+at+1,radio->vif->addr,6);
+							at+=n;
+						}
+					}
+				}
+			}
+		}
+	}
+	lx_tell("lx: packet %s type %#x length %u group %u source-is-station %u UDP %u->%u BOOTP %u checksums %u/%u DHCP %u chaddr %u client-id %u broadcast %u\n",
+	    transmit ? "TX" : "RX",type,length,frame[0]&1,
+	    radio->vif && !memcmp(frame+6,radio->vif->addr,ETH_ALEN),source,destination,bootp,ip_ok,udp_ok,dhcp_type,chaddr,client_id,broadcast);
+}
+
 /* An Ethernet frame, through the driver's data path: the firmware makes 802.11 of it, and ciphers it once there is a key. */
 static bool
 ethernet_send(struct lx_radio *radio, const uint8_t *frame, unsigned length)
@@ -738,6 +790,7 @@ ethernet_send(struct lx_radio *radio, const uint8_t *frame, unsigned length)
 	memcpy(bytes, frame, length);
 	IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_CTL_HW_80211_ENCAP;
 	IEEE80211_SKB_CB(skb)->control.hw_key = radio->pairwise_key;
+	ethernet_trace(radio,frame,length,true);
 	radio->sent++;
 	frame_send(radio, skb);
 	return (true);
@@ -821,6 +874,7 @@ ethernet_received(struct lx_radio *radio, struct sk_buff *skb)
 	if (skb->len >= 14 && skb->data[12] == 0x88 && skb->data[13] == 0x8e) {
 		handshake_message(radio, skb->data, skb->len);
 	} else if (radio->joined && skb->len >= 14) {
+		ethernet_trace(radio,skb->data,skb->len,false);
 		*(skb->data[0] & 1 ? &radio->received_group : &radio->received) += 1;
 		lx_os_net_input(skb->data, skb->len);
 	}
@@ -843,11 +897,6 @@ management_received(struct lx_radio *radio, const uint8_t *f, unsigned length)
 	} else if (f[0] == 0x10 && length >= 30) {	/* association response: capabilities, status, our number, elements */
 		status = f[26] | f[27] << 8;
 		answer = status == 0 ? ANSWER_ASSOCIATED : ANSWER_REFUSED;
-		lx_os_lock();
-		radio->aid = (uint16_t)((f[28] | f[29] << 8) & 0x3fff);
-		radio->answer_length = length - 30 < ELEMENTS_MOST ? length - 30 : ELEMENTS_MOST;
-		memcpy(radio->answer_elements, f + 30, radio->answer_length);
-		lx_os_unlock();
 	} else if (f[0] == 0xd0 && length >= 28 && f[24] == 3 && radio->reached >= IEEE80211_STA_ASSOC && lx_os_option("wifi_ba")) {
 		/* an action frame, block ack's: ADDBA request (0) or DELBA (2); done on the driver's terms in ba_handle() */
 		unsigned tid;
@@ -885,6 +934,18 @@ management_received(struct lx_radio *radio, const uint8_t *f, unsigned length)
 	}
 	if (answer != ANSWER_NONE) {
 		lx_os_lock();
+		/* Retransmitted authentication replies must not end association (or
+		 * overwrite its result). Disconnects apply in either phase and cannot
+		 * be undone by a delayed successful response. */
+		if (answer != ANSWER_GONE && (f[0] != radio->answer_frame || radio->answer == ANSWER_GONE)) {
+			lx_os_unlock();
+			return;
+		}
+		if (f[0] == 0x10) {
+			radio->aid = (uint16_t)((f[28] | f[29] << 8) & 0x3fff);
+			radio->answer_length = length - 30 < ELEMENTS_MOST ? length - 30 : ELEMENTS_MOST;
+			memcpy(radio->answer_elements, f + 30, radio->answer_length);
+		}
 		radio->answer = answer;
 		radio->answer_status = (uint16_t)status;
 		lx_os_wakeup(&radio->answer);
@@ -1165,6 +1226,21 @@ ba_handle(struct work_struct *work)
 
 /* ---- the station: joining a network -------------------------------------------------------------------- */
 
+/* Arm before sending, under the same lock used to publish a received reply. */
+static void
+answer_begin(struct lx_radio *radio, uint8_t response_frame)
+{
+	lx_os_lock();
+	radio->answer_frame = response_frame;
+	radio->answer = ANSWER_NONE;
+	radio->answer_status = 0;
+	if (response_frame == 0x10) {
+		radio->aid = 0;
+		radio->answer_length = 0;
+	}
+	lx_os_unlock();
+}
+
 /* Wait for the access point's answer to a management frame: one of the ANSWER_s, or ANSWER_NONE when the time is up. */
 static int
 answer_wait(struct lx_radio *radio, unsigned ms)
@@ -1259,6 +1335,18 @@ station_abilities(struct lx_radio *radio, const uint8_t *elements, unsigned leng
  * capabilities if it has them, and WMM. Returns their length.
  */
 static unsigned
+request_rsn(uint8_t *out, uint8_t *rsn, unsigned group_cipher)
+{
+	bzero(rsn,24);
+	if (group_cipher==0) { return 0; } /* explicitly selected open network */
+	rsn[0]=48;rsn[1]=20;
+	memcpy(rsn+2,"\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x02\x00\x00",20);
+	rsn[7]=(uint8_t)group_cipher;
+	memcpy(out,rsn,22);
+	return 22;
+}
+
+static unsigned
 request_elements(struct lx_radio *radio, uint8_t *out, unsigned group_cipher)
 {
 	const struct lx_target *target = &radio->target;
@@ -1290,12 +1378,7 @@ request_elements(struct lx_radio *radio, uint8_t *out, unsigned group_cipher)
 		*at++ = (uint8_t)channel_of(channel->center_freq);
 		*at++ = 1;
 	}
-	radio->rsn[0] = 48;
-	radio->rsn[1] = 20;
-	memcpy(radio->rsn + 2, "\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x04\x01\x00\x00\x0f\xac\x02\x00\x00", 20);
-	radio->rsn[7] = (uint8_t)group_cipher;
-	memcpy(at, radio->rsn, 22);
-	at += 22;
+	at += request_rsn(at,radio->rsn,group_cipher);
 	if (element(target->elements, target->elements_length, 45) != NULL && band->ht_cap.ht_supported) {
 		uint16_t cap = (uint16_t)(band->ht_cap.cap & (radio->width > 20 ? 0xffff : ~(IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
 		    IEEE80211_HT_CAP_SGI_40)));
@@ -1375,6 +1458,17 @@ protection(const struct lx_target *target, unsigned *group_cipher)
 		return ("it requires protected management frames, which are not done here");
 	}
 	return (NULL);
+}
+
+static const char *
+join_protection(const struct lx_target *target, unsigned security, unsigned *group_cipher)
+{
+	if (security==REDWOOD_STA_OPEN) {
+		*group_cipher=0;
+		return (target->capability&0x10) || element(target->elements,target->elements_length,48) ?
+		    "a protected access point cannot be joined as open" : NULL;
+	}
+	return security==REDWOOD_STA_WPA2_PSK ? protection(target,group_cipher) : "unsupported security type";
 }
 
 /* Pairwise CCMP; group CCMP or TKIP. The firmware handles frame ciphers. */
@@ -1592,13 +1686,14 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 	const char *obstacle;
 	unsigned long long began;
 	unsigned group_cipher = 0, length;
+	bool protected = what->security == REDWOOD_STA_WPA2_PSK;
 	int ret, error = 0, answer = ANSWER_NONE;
 
 	if (name_length == 0 || name_length > sizeof(radio->want)) {
 		return (EINVAL);
 	}
-	if (what->security != REDWOOD_STA_WPA2_PSK) {
-		lx_tell("lx: a network without WPA2 and a passphrase is asked for: that is not built\n");
+	if (what->security != REDWOOD_STA_WPA2_PSK && what->security != REDWOOD_STA_OPEN) {
+		lx_tell("lx: an unsupported network security type is asked for\n");
 		return (ENOTSUP);
 	}
 	if (radio->sta != NULL) {
@@ -1647,13 +1742,13 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 		/* (a beacon can be heard on the channel next to its own: where it says it is counts) */
 		channel = linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band));
 	}
-	obstacle = protection(target, &group_cipher);
+	obstacle = join_protection(target, what->security, &group_cipher);
 	lx_tell("lx: the network that is wanted: an access point on channel %u (%u MHz) at %d dBm, capabilities %#x, beacons every "
 	    "%u units; HT %s, VHT %s, WMM %s; %s%s\n", channel != NULL ? channel_of(channel->center_freq) : 0, channel != NULL ?
 	    channel->center_freq : 0, target->signal, target->capability, target->interval, element(target->elements,
 	    target->elements_length, 45) ? "yes" : "no", element(target->elements, target->elements_length, 191) ? "yes" : "no",
-	    vendor_element(target->elements, target->elements_length, wmm) ? "yes" : "no", obstacle == NULL ? "WPA2 with a "
-	    "passphrase and CCMP: it can be joined" : "IT CANNOT BE JOINED: ", obstacle == NULL ? "" : obstacle);
+	    vendor_element(target->elements, target->elements_length, wmm) ? "yes" : "no", obstacle == NULL ?
+	    (protected ? "WPA2 with CCMP: it can be joined" : "open: it can be joined") : "IT CANNOT BE JOINED: ", obstacle == NULL ? "" : obstacle);
 	if (obstacle != NULL || channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED)) {
 		return (ENOTSUP);
 	}
@@ -1663,16 +1758,16 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 	/* the key of the name and the passphrase, and what the handshake needs besides */
 	began = lx_os_nanoseconds();
 	bzero(&radio->wpa, sizeof(radio->wpa));
-	if (what->passphrase_length != 0) {
+	if (protected && what->passphrase_length != 0) {
 		lx_wpa_pmk(what->passphrase, what->passphrase_length, name, name_length, radio->wpa.pmk);
-	} else {
+	} else if (protected) {
 		memcpy(radio->wpa.pmk, what->pmk, sizeof(radio->wpa.pmk));
 	}
 	memcpy(radio->wpa.own, vif->addr, ETH_ALEN);
 	memcpy(radio->wpa.peer, target->address, ETH_ALEN);
 	get_random_bytes(radio->wpa.own_nonce, sizeof(radio->wpa.own_nonce));
 	radio->wpa.rsn = radio->rsn;
-	radio->wpa.rsn_length = 22;
+	radio->wpa.rsn_length = protected ? 22 : 0;
 	radio->handshake = LX_WPA_NOTHING;
 	printf("lx: the key of the name (%u bytes) and the passphrase (%u bytes; 0: the key itself was given) is there: %llu ms\n",
 	    name_length, what->passphrase_length, (lx_os_nanoseconds() - began) / 1000000ull);
@@ -1730,7 +1825,7 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 
 	/* authentication, of the kind that asks nothing ("open system": the passphrase is proved in the handshake) */
 	for (unsigned attempt = 0; attempt < 3 && answer == ANSWER_NONE; attempt++) {
-		radio->answer = ANSWER_NONE;
+		answer_begin(radio, 0xb0);
 		if ((skb = frame_new(radio, 30, &frame)) == NULL) {
 			break;
 		}
@@ -1750,13 +1845,13 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 	/* association: what we can do, and that we want its protection */
 	answer = ANSWER_NONE;
 	for (unsigned attempt = 0; attempt < 3 && answer == ANSWER_NONE; attempt++) {
-		radio->answer = ANSWER_NONE;
+		answer_begin(radio, 0x10);
 		if ((skb = frame_new(radio, 28 + 300, &frame)) == NULL) {
 			break;
 		}
 		frame = management(radio, frame, 0x00);
 		/* capabilities: an infrastructure network, protected, and of the access point's own what a station repeats */
-		frame[0] = (uint8_t)(0x01 | 0x10 | (target->capability & 0x20));
+		frame[0] = (uint8_t)(0x01 | (protected ? 0x10 : 0) | (target->capability & 0x20));
 		frame[1] = (uint8_t)((target->capability & 0x0500) >> 8);
 		frame[2] = 10;				/* we listen at least every tenth beacon */
 		frame[3] = 0;
@@ -1803,30 +1898,33 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
 	    radio->sta->deflink.vht_cap.vht_supported ? "yes" : "no", radio->sta->deflink.rx_nss);
 
 	/* the handshake: the access point begins it; its messages come in as frames and are answered where they come in */
-	began = lx_os_nanoseconds();
-	lx_os_lock();
-	while (radio->handshake != LX_WPA_KEYS && radio->handshake != LX_WPA_BAD && radio->answer != ANSWER_GONE &&
-	    lx_os_nanoseconds() - began < 8000000000ull) {
-		lx_os_sleep(&radio->handshake, 20 * 1000000ull);
+	ret = 0;
+	if (protected) {
+		began = lx_os_nanoseconds();
+		lx_os_lock();
+		while (radio->handshake != LX_WPA_KEYS && radio->handshake != LX_WPA_BAD && radio->answer != ANSWER_GONE &&
+		    lx_os_nanoseconds() - began < 8000000000ull) {
+			lx_os_sleep(&radio->handshake, 20 * 1000000ull);
+		}
+		lx_os_unlock();
+		if (radio->handshake != LX_WPA_KEYS) {
+			lx_tell("lx: THE HANDSHAKE DID NOT COME THROUGH in %llu ms: %s%s (%u of its messages came)\n", (lx_os_nanoseconds() - began) /
+			    1000000ull, radio->answer == ANSWER_GONE ? "the access point has shown us the door (a wrong passphrase gives this)" :
+			    radio->handshake == LX_WPA_BAD ? "a message was not good: " : radio->handshake == LX_WPA_ANSWER ? "our message 2 was "
+			    "not answered (a wrong passphrase gives this)" : "the access point did not begin it", radio->handshake == LX_WPA_BAD ?
+			    radio->handshake_why : "", radio->eapol);
+			error = EAUTH;
+			goto out;
+		}
+		lx_pause_ms(30);			/* (for message 4 to have left unciphered, before there is a key to cipher with) */
+		radio->pairwise_key = key_set(radio, radio->wpa.pairwise, 0, true, &ret);
+		if (ret == 0) {
+			radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &ret);
+		}
+		lx_tell("lx: THE KEYS ARE GIVEN TO THE DRIVER, %llu ms after the association: ours with the access point, and the group's "
+		    "(number %u, %u bytes): %d\n", (lx_os_nanoseconds() - began) / 1000000ull, radio->wpa.group_index,
+		    radio->wpa.group_length, ret);
 	}
-	lx_os_unlock();
-	if (radio->handshake != LX_WPA_KEYS) {
-		lx_tell("lx: THE HANDSHAKE DID NOT COME THROUGH in %llu ms: %s%s (%u of its messages came)\n", (lx_os_nanoseconds() - began) /
-		    1000000ull, radio->answer == ANSWER_GONE ? "the access point has shown us the door (a wrong passphrase gives this)" :
-		    radio->handshake == LX_WPA_BAD ? "a message was not good: " : radio->handshake == LX_WPA_ANSWER ? "our message 2 was "
-		    "not answered (a wrong passphrase gives this)" : "the access point did not begin it", radio->handshake == LX_WPA_BAD ?
-		    radio->handshake_why : "", radio->eapol);
-		error = EAUTH;
-		goto out;
-	}
-	lx_pause_ms(30);			/* (for message 4 to have left unciphered, before there is a key to cipher with) */
-	radio->pairwise_key = key_set(radio, radio->wpa.pairwise, 0, true, &ret);
-	if (ret == 0) {
-		radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &ret);
-	}
-	lx_tell("lx: THE KEYS ARE GIVEN TO THE DRIVER, %llu ms after the association: ours with the access point, and the group's "
-	    "(number %u, %u bytes): %d\n", (lx_os_nanoseconds() - began) / 1000000ull, radio->wpa.group_index,
-	    radio->wpa.group_length, ret);
 	if (ret != 0 || (ret = station_state(radio, IEEE80211_STA_ASSOC, IEEE80211_STA_AUTHORIZED)) != 0) {
 		error = -ret;
 		goto out;

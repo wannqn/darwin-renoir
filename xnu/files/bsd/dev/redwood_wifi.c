@@ -5124,15 +5124,19 @@ renoir_wifi_thread(__unused void *parameter,__unused wait_result_t result)
 static void
 renoir_wifi_begin(void)
 {
-	uint64_t length=0;uint8_t address[6];thread_t thread;uint32_t loud=0;
+	uint64_t length=0,firmware_length=0;uint8_t address[6];thread_t thread;uint32_t loud=0,probe=27;
 	if (pe_arm_get_soc_base_phys()!=REDWOOD_SOC_BASE ||
-	    !image_file_in("fw-wifi-renoir","amss20.bin",&length) ||
+	    !image_file_in("fw-wifi-renoir","amss20.bin",&firmware_length) ||
 	    !image_file_in("fw-wifi-renoir","bd_k9gl.elf",&length) ||
-	    !image_file("network",&length) || !redwood_wifi_radio_address(address)) {
-		tell("renoir-wifi: missing phone hardware, firmware, network or station address; radio not started\n");return;
+	    !redwood_wifi_radio_address(address)) {
+		tell("renoir-wifi: missing phone hardware, firmware or station address; radio not started\n");return;
 	}
+	/* Saved credentials are optional: SHARE=1 omits them. Start the station
+	 * anyway so wifid can scan and join a network selected in Settings. */
 	whole=true;quiet=!(PE_parse_boot_argn("wifi_loud",&loud,sizeof(loud)) && loud);
 	redwood_lx_net_early();
+	PE_parse_boot_argn("wifi_probe",&probe,sizeof(probe));
+	if (probe==27 && firmware_length<=0x800000) { renoir_bhi_reserve((uint32_t)firmware_length); }
 	renoir_session_wanted=true;renoir_session_running=true;
 	if (kernel_thread_start(renoir_wifi_thread,NULL,&thread)!=KERN_SUCCESS) {
 		renoir_session_wanted=false;renoir_session_running=false;

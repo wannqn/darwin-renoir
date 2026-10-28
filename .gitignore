@@ -59,6 +59,8 @@ __pycache__/
 !/xnu-deps/setup.sh
 !/xnu-deps/gen-iig-stubs.py
 !/xnu-deps/hostinc/
+# Optional workspace-local system development headers.
+/xnu-deps/hostinc/uuid/
 !/xnu-deps/iig-impl/
 !/xnu-deps/host/
 /xnu-deps/host/*
