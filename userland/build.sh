@@ -26,7 +26,7 @@
 #                                   a directory). This goes into the boot volume, which every recipe
 #                                   carries and which the flash recipe puts in RAM, so its size is paid
 #                                   for at every boot -- a few megabytes, not more
-#                      RC_JOBS=<file> what the job com.redwood.demo runs: rc.jobs (default), or
+#                      RC_JOBS=<file> what the job com.redwood.demo runs: rc.jobs.renoir (default), or
 #                                   rc.jobs.unlock, which also swipes the lock screen away (for the phone,
 #                                   where nothing else can touch the screen yet).
 #                                   A job list cannot assume a shell. iOS 16.5's own root has none at all

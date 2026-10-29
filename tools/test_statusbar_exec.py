@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess, tempfile
 r = Path(__file__).resolve().parents[1]
-patch = (r / "xnu/redwood.patch").read_text()
+patch = (r / "xnu/renoir.patch").read_text()
 added = "\n".join(line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++"))
 start = added.index("static bool\nexec_inject_env(")
 parser = added[start:added.index("\n}", start) + 2]

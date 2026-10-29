@@ -314,7 +314,7 @@ launchd/BackBoard/SpringBoard, но завершился внешним timeout 
 Origin переписан с `b1616f7` на `a4eefb7`; пять новых коммитов объединены
 merge-коммитом `81b0612`. Локальная работа сохранена в stash
 `cf154c9dba4cc680335a35b59b93996db79b55e6` и восстановлена; конфликты
-redwood_input.h и redwood.patch разрешены. PM7250B battery ограничен
+redwood_input.h и renoir.patch разрешены. PM7250B battery ограничен
 redwood; userland при неизвестном SOC возвращает исходное состояние батареи.
 Сборка с ath11k прошла; минимальный QEMU после merge: exit 0, PID1 и
 штатный возврат (`logs/qemu-renoir-a4eefb7-smoke.log`).
