@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and exercise Bluetooth H4 probe framing without touching a phone."""
+"""Exercise Bluetooth H4, hardware-survey and GENI FIFO cores without a phone."""
 from pathlib import Path
 import os
 import shlex

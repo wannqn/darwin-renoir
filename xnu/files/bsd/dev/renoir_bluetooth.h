@@ -1,17 +1,33 @@
 /* Renoir-only, opt-in Bluetooth hardware survey. Included by redwood_wifi.c.
- * Shima GCC: UART SE15 is wrapper 0 SE7 (not wrapper 1). No writes, reset,
- * clock votes, firmware download or publication of a fictitious HCI device.
+ * Shima GCC: UART SE15 is wrapper 0 SE7 (not wrapper 1). Mode 1 is read-only;
+ * mode 2 temporarily votes only this UART clock. No reset, firmware download
+ * or publication of a fictitious HCI device.
  */
 #ifndef RENOIR_BLUETOOTH_H
 #define RENOIR_BLUETOOTH_H
 static void
-renoir_bluetooth_survey_run(void)
+renoir_bluetooth_survey_run(unsigned mode)
 {
  vm_offset_t gcc=ml_io_map(0x00100000,0x60000);
  vm_offset_t pins=ml_io_map(0x0f100000,0x100000);
  if(!gcc || !pins){printf("renoir-bt: register mapping failed\n");return;}
  uint32_t vote=rd(gcc+0x52008), status=rd(gcc+0x1785c);
- printf("renoir-bt: UART SE15/wrap0-S7: votes %#x branch %#x; no writes\n",vote,status);
+ bool clock_added=false;
+ if(mode==2) {
+  /* Wrapper clocks belong to other clients. Require their existing votes;
+   * this experiment changes only S7 and never changes an RCG or shared rail. */
+  if((vote&0x3c0)!=0x3c0){printf("renoir-bt: wrapper clocks not voted; refusing clock probe\n");return;}
+  clock_added=!(vote&(1u<<17));
+  if(clock_added)wr(gcc+0x52008,rd(gcc+0x52008)|(1u<<17));
+  for(unsigned i=0;i<1000;i++) {
+   status=rd(gcc+0x1785c);
+   if(!(status&0x80000000u))break;
+   sleep_us(10);
+  }
+  printf("renoir-bt: temporary S7 clock vote: added %u, votes %#x branch %#x\n",
+   clock_added,rd(gcc+0x52008),status);
+ }
+ printf("renoir-bt: UART SE15/wrap0-S7: votes %#x branch %#x; mode %u\n",vote,status,mode);
  printf("renoir-bt: clock RCG cmd %#x cfg %#x DFS %#x\n",
   rd(gcc+0x17860),rd(gcc+0x17864),rd(gcc+0x17874));
  const unsigned gpio[]={64,65,68,69,70,71,91};
@@ -26,22 +42,33 @@ renoir_bluetooth_survey_run(void)
  bool ahb_slave=!(slave&0x80000000u) || (slave&2);
  if((status&0x80000000u) || !ahb_master || !ahb_slave) {
   printf("renoir-bt: UART clock off: SE %#x M-AHB %#x S-AHB %#x; UART MMIO skipped\n",status,master,slave);
-  return;
+  goto restore;
  }
  vm_offset_t uart=ml_io_map(0x0099c000,0x4000);
- if(!uart){printf("renoir-bt: UART mapping failed\n");return;}
+ if(!uart){printf("renoir-bt: UART mapping failed\n");goto restore;}
  uint32_t rev=rd(uart+0x68), protocol=(rev>>8)&0xff;
  printf("renoir-bt: UART firmware %#x protocol %u (UART=2); FIFO disabled %#x\n",rev,protocol,rd(uart+0x64));
- if(protocol!=2){printf("renoir-bt: no UART firmware; no controller command sent\n");return;}
+ if(protocol!=2){printf("renoir-bt: no UART firmware; no controller command sent\n");goto restore;}
  printf("renoir-bt: UART status %#x clock M %#x S %#x; hardware parameters %#x/%#x\n",
   rd(uart+0x40),rd(uart+0x48),rd(uart+0x4c),rd(uart+0xe24),rd(uart+0xe28));
+ vm_offset_t wrapper=ml_io_map(0x009c0000,0x2000);
+ if(wrapper)printf("renoir-bt: QUP wrapper hardware version %#x\n",rd(wrapper+4));
  printf("renoir-bt: UART TX/RX FIFO status %#x/%#x; no data consumed\n",rd(uart+0x800),rd(uart+0x804));
+restore:
+ if(clock_added) {
+  wr(gcc+0x52008,rd(gcc+0x52008)&~(1u<<17));
+  for(unsigned i=0;i<1000 && !(rd(gcc+0x1785c)&0x80000000u);i++)sleep_us(10);
+  printf("renoir-bt: removed temporary S7 clock vote; votes %#x branch %#x\n",rd(gcc+0x52008),rd(gcc+0x1785c));
+ }
 }
 static void
 renoir_bluetooth_survey(void *unused, wait_result_t result)
 {
- (void)unused; (void)result;
- renoir_bluetooth_survey_run();
+ (void)result;
+ unsigned mode=(unsigned)(uintptr_t)unused;
+ /* Let existing touchscreen/Wi-Fi clock initialization finish first. */
+ if(mode==2)sleep_ms(30000);
+ renoir_bluetooth_survey_run(mode);
  thread_terminate(current_thread());
 }
 static void
@@ -49,11 +76,11 @@ renoir_bluetooth_init(void)
 {
  uint32_t mode=0;
  if(!PE_parse_boot_argn("bluetooth_probe",&mode,sizeof(mode)) || !mode)return;
- if(mode!=1 || !redwood_board_is("renoir") || pe_arm_get_soc_base_phys()!=REDWOOD_SOC_BASE){
-  printf("renoir-bt: refused: bluetooth_probe=1 requires physical renoir\n");return;
+ if((mode!=1 && mode!=2) || !redwood_board_is("renoir") || pe_arm_get_soc_base_phys()!=REDWOOD_SOC_BASE){
+  printf("renoir-bt: refused: bluetooth_probe=1/2 requires physical renoir\n");return;
  }
  thread_t worker;
- if(kernel_thread_start(renoir_bluetooth_survey,NULL,&worker)==KERN_SUCCESS)thread_deallocate(worker);
+ if(kernel_thread_start(renoir_bluetooth_survey,(void *)(uintptr_t)mode,&worker)==KERN_SUCCESS)thread_deallocate(worker);
  else printf("renoir-bt: cannot start hardware survey\n");
 }
 #endif

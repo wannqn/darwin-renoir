@@ -170,3 +170,50 @@ model under ASan/UBSan. A freestanding ARM64 iOS wrapper compiles both protocol
 and FIFO engines with warnings treated as errors. Recovery boot/payload and
 Wi-Fi-start tests pass. The next hardware milestone is UART clock/pinmux setup
 and a real Qualcomm ROM-version response. Functional Bluetooth remains pending.
+
+## Reversible UART clock probe
+
+`bluetooth_probe=2` now waits 30 seconds for existing startup work, requires
+the wrapper clock votes already present, and temporarily adds only GCC vote
+bit 17 (wrapper0 SE7). It never changes a shared AHB vote, regulator, RCG,
+GPIO configuration or reset line. Every exit after adding the vote clears
+only the bit this probe added; an existing UART vote is retained. The probe
+remains disabled without the explicit boot argument.
+
+The phone ran the separate stable-source clock-probe kernel successfully.
+Observed hardware state:
+
+- Votes `0x083c93ff` became `0x083e93ff` during the probe, then returned to
+  `0x083c93ff`. The UART clock branch changed from off to `0x4220`.
+- UART firmware revision `0x204`, protocol 2, FIFO interface enabled.
+- Main/secondary sequencers idle; both FIFO status values zero.
+- Hardware parameters `0x20102864` / `0x20204800`: 32-bit FIFO width,
+  16 TX words and 32 RX words. QUP wrapper revision `0x30000000`.
+- UART main clock config `0x11`, secondary config zero; current RCG is
+  crystal-sourced (`cfg=0x100000`, DFS `0x8020`, DFS enable bit clear).
+- At this later snapshot WLAN enable GPIO64 was high, BT enable GPIO65 low,
+  BT software-control GPIO91 high and UART pins still in GPIO mode.
+
+The last immediate branch read after removing the temporary vote was still
+`0x4220`; the vote readback proves removal, not immediate physical clock halt.
+The source was subsequently extended with a bounded wait to observe clock
+gating after removal. That follow-up builds and passes host tests; its added
+cleanup observation awaits the next hardware run. It does not add another
+clock write.
+
+Phone-tested clock-probe kernel SHA256:
+`c695972865d5148a763b51fa940268303b1b0e8a1765062077df61cbbfe1f796`.
+Follow-up cleanup-observer kernel SHA256:
+`b8825eea001228e01d12f1d98e2f1cc19c2d43843218bedb83302572c7b866cc`.
+Both are local ignored artifacts. Evidence:
+`recovery/assets/bluetooth-clock-probe.log`. No controller packet was sent.
+The stable session was restored after the experiment; the default prebuilt
+remains unchanged.
+
+Host tests cover missing wrapper votes, clock success and timeout, UART mapping
+failure, wrong protocol, preservation of a pre-existing UART vote and cleanup
+on each exit. The full stable-source XNU build succeeds. Next is a bounded
+controller identity request: establish an accurate UART baud clock, validate
+existing shared supply votes, configure the UART/pins, enable only BT_EN,
+query the ROM and restore all temporary state. Firmware must be chosen from
+the actual controller response, not the device-tree name alone.
