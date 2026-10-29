@@ -321,6 +321,6 @@ Bluetooth probe job. The newer kernels and ignored diagnostic images are
 preserved locally. Source changes remain in Git for later investigation; this
 rollback changes the default binary and boot options, not repository history.
 
-Payload and boot-helper tests pass; all 36 prebuilt checksums match. Visual
-recovery on the restored build still requires user confirmation. Bluetooth
-remains unsupported; no functional Bluetooth fix was made.
+Payload and boot-helper tests pass; all 36 prebuilt checksums match. The user confirmed that the visual artifacts are gone and the screen behaves
+normally on the restored build. Bluetooth remains unsupported; no functional
+Bluetooth fix was made.
