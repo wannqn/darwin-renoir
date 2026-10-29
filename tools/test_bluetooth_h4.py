@@ -8,9 +8,11 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='renoir-bt-') as tmp:
-    exe = Path(tmp) / 'test-h4'
     compiler = shlex.split(os.environ.get('CC', 'cc'))
-    subprocess.run(compiler + ['-std=c11', '-Wall', '-Wextra', '-Werror',
+    for name in ('h4', 'survey', 'geni'):
+        exe = Path(tmp) / ('test-' + name)
+        subprocess.run(compiler + ['-std=c11', '-Wall', '-Wextra', '-Werror',
                    '-fsanitize=address,undefined', '-g',
-                   str(root / 'tools/bt-test/test_h4.c'), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
+                   str(root / ('tools/bt-test/test_' + name + '.c')), '-o', str(exe)], check=True)
+        result = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+        print(result.stdout.strip().splitlines()[-1])

@@ -124,3 +124,49 @@ Protocol/hardware references consulted:
   vendor version reply layouts and firmware selection. Local reference copies
   of `btqca.c` and `btqca.h` were read from the already verified Linux 7.0.14
   archive used by this repository, after a network fetch was rate-limited.
+
+## Read-only physical UART survey and FIFO transport
+
+The user authorized a brief RAM restart for a read-only probe and restoration
+of the stable session. The probe build uses the Wi-Fi-tested source revision
+`1aa1aa8` (its original XNU patch/files) plus the new survey, rather than the
+incoming GPU/display changes. It is kept separately under
+`xnu-src/renoir-bluetooth-stable`. The default prebuilt is unchanged.
+
+The opt-in `bluetooth_probe=1` survey in `renoir_bluetooth.h` is called from
+Wi-Fi initialization before evaluating the Wi-Fi boot flag. It requires both
+the physical Renoir board and peripheral base, makes no MMIO writes, does not
+consume FIFO data and avoids the UART aperture if its clocks are off. The
+worker terminates explicitly on every path. Without the flag it does nothing.
+
+Hardware result at early boot:
+
+- GCC vote `0x083c93c0`, UART SE7 branch `0x80004220` (clock off).
+- RCG command `0x80000000`, config `0x00100000`, DFS `0x8020`.
+- BT enable GPIO65 low; UART pins GPIO68–71 still in GPIO mode.
+- M-AHB branch `0`, S-AHB branch `0x8000000a` (hardware gated).
+- UART MMIO was skipped because the serial-engine clock was off.
+
+This is an early-boot snapshot, not evidence of the shared rails' state after
+Wi-Fi completes initialization. No controller packet was sent. The probe was
+stopped and the original stable kernel/root RAM session restored afterward.
+Evidence: ignored `recovery/assets/bluetooth-stable-survey.log`.
+
+Survey kernel: 15,645,480 bytes, SHA256
+`58a0e5ac2254e37e9c30844904d45f6e311fdd4ce9ffaa267428ade311745a3a`.
+The full source build exited successfully. The runtime probe remains separate
+from the normal root and boot helper.
+
+`renoir_bt_geni.h` now implements a hardware-independent UART FIFO engine with
+8N1/CTS configuration, validated clock divider, little-endian byte packing,
+bounded transmit/abort waits and partial-word receive accounting. It refuses
+a busy sequencer, missing UART firmware, unsuitable FIFO geometry and excessive
+baud error. The caller must first establish the correct power, clocks and
+pinmux. This engine is not yet connected to hardware or the iOS daemon. It does
+not implement DMA, interrupt delivery, IBS, firmware download or audio.
+
+The Bluetooth test runner now exercises H4, survey gates and the FIFO register
+model under ASan/UBSan. A freestanding ARM64 iOS wrapper compiles both protocol
+and FIFO engines with warnings treated as errors. Recovery boot/payload and
+Wi-Fi-start tests pass. The next hardware milestone is UART clock/pinmux setup
+and a real Qualcomm ROM-version response. Functional Bluetooth remains pending.
