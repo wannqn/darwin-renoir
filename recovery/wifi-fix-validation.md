@@ -306,3 +306,21 @@ reservation, radio initialization and scanning on both 2.4 GHz and 5 GHz, with
 no panic observed in the collected log. WPA2 association and Safari results
 are still pending user confirmation. Evidence stays local in ignored
 `recovery/assets/wifi-integrated-first.log` and `wifi-integrated-live.log`.
+
+## Display regression rollback (2026-10-29)
+
+The user confirmed Wi-Fi and Safari work on the combined rebuild, then reported
+severe visual artifacts during Bluetooth investigation and requested abort.
+Bluetooth work was stopped. The default prebuilt was restored to the earlier
+phone-tested Wi-Fi kernel, SHA256
+`2ba66e7ed92be213a371027e45a553aba9cfd0f3e22b4d67ff14c804d1e6c21b`.
+The incoming forced `cpus=8`, `touch_lat=1` and `fb_filter=0` edits were removed
+from the recovery payload helper: it again preserves the archived boot options.
+The normal SHARE root and earlier kernel were RAM-booted again, with no
+Bluetooth probe job. The newer kernels and ignored diagnostic images are
+preserved locally. Source changes remain in Git for later investigation; this
+rollback changes the default binary and boot options, not repository history.
+
+Payload and boot-helper tests pass; all 36 prebuilt checksums match. Visual
+recovery on the restored build still requires user confirmation. Bluetooth
+remains unsupported; no functional Bluetooth fix was made.
