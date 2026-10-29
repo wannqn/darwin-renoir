@@ -15,7 +15,7 @@ struct rbt_geni {
  unsigned depth, rx_depth;
  bool ready;
 };
-static bool rbt_geni_wait(struct rbt_geni *u,unsigned reg,uint32_t mask,uint32_t value)
+static inline bool rbt_geni_wait(struct rbt_geni *u,unsigned reg,uint32_t mask,uint32_t value)
 {
  for(unsigned i=0;i<1000;i++) {
   if((u->read(u->ctx,reg)&mask)==value)return true;
@@ -23,7 +23,7 @@ static bool rbt_geni_wait(struct rbt_geni *u,unsigned reg,uint32_t mask,uint32_t
  }
  return false;
 }
-static bool rbt_geni_configure(struct rbt_geni *u,uint32_t clock_hz,unsigned selection,unsigned sampling,unsigned baud)
+static inline bool rbt_geni_configure(struct rbt_geni *u,uint32_t clock_hz,unsigned selection,unsigned sampling,unsigned baud)
 {
  u->ready=false;
  if(!u->read || !u->write || !u->delay_us || selection>7 ||
@@ -60,7 +60,7 @@ static bool rbt_geni_configure(struct rbt_geni *u,uint32_t clock_hz,unsigned sel
  #undef BW
  u->ready=true;return true;
 }
-static bool rbt_geni_tx(struct rbt_geni *u,const uint8_t *data,size_t size)
+static inline bool rbt_geni_tx(struct rbt_geni *u,const uint8_t *data,size_t size)
 {
  if(!u->ready || !size || size>4*u->depth || !data)return false;
  if((u->read(u->ctx,0x40)&1) || u->read(u->ctx,0x800))return false;
@@ -78,7 +78,7 @@ static bool rbt_geni_tx(struct rbt_geni *u,const uint8_t *data,size_t size)
  u->write(u->ctx,0x618,1u<<5);u->ready=false;return false;
 }
 /* One FIFO snapshot, bounded by advertised hardware capacity. */
-static int rbt_geni_rx(struct rbt_geni *u,uint8_t *out,size_t capacity)
+static inline int rbt_geni_rx(struct rbt_geni *u,uint8_t *out,size_t capacity)
 {
  if(!u->ready || !out)return -1;
  uint32_t status=u->read(u->ctx,0x804);unsigned words=status&0x1ffffff;

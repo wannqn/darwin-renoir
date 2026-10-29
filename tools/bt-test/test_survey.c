@@ -9,6 +9,7 @@ typedef int wait_result_t;
 typedef int thread_t;
 #define KERN_SUCCESS 0
 #define REDWOOD_SOC_BASE 0x400000
+static volatile bool renoir_transport_ready=true;
 static unsigned mode, board=1, soc=1, maps, reads, uart_reads, fifo_reads, workers, ended;
 static unsigned writes, waited;
 static uint32_t votes;
@@ -36,7 +37,8 @@ static void wr(vm_offset_t p,uint32_t v){
  if(clock_emulated && !clock_stuck)clock_status=(votes&(1u<<17))?0:0x80000000;
 }
 static void sleep_us(uint32_t us){assert(us==10);waited++;}
-static void sleep_ms(uint32_t ms){assert(ms==30000);}
+static void sleep_ms(uint32_t ms){assert(ms==100 || ms==1000 || ms==10);}
+static bool renoir_rpmh_read(const char *name,uint32_t off,uint32_t *v){(void)name;(void)off;(void)v;return false;}
 static int current_thread(void){return 1;}
 static void thread_terminate(int t){assert(t==1);ended++;}
 static void thread_deallocate(int t){assert(t==1);}
@@ -44,7 +46,7 @@ static int kernel_thread_start(void(*fn)(void*,wait_result_t),void *p,thread_t *
 #include "../../xnu/files/bsd/dev/renoir_bluetooth.h"
 int main(void){
  renoir_bluetooth_init();assert(!maps&&!workers);
- mode=3;renoir_bluetooth_init();assert(!maps&&!workers);
+ mode=4;renoir_bluetooth_init();assert(!maps&&!workers);
  mode=1;board=0;renoir_bluetooth_init();assert(!maps);
  board=1;soc=0;renoir_bluetooth_init();assert(!maps);
  soc=1;renoir_bluetooth_init();assert(workers==1&&ended==1&&maps==2&&!uart_reads);
@@ -60,6 +62,8 @@ int main(void){
  clock_stuck=false;map_fail=true;renoir_bluetooth_init();assert(writes==6 && votes==0x3c0);
  map_fail=false;protocol=1;renoir_bluetooth_init();assert(writes==8 && votes==0x3c0);
  protocol=2;votes|=1u<<17;clock_status=0;renoir_bluetooth_init();assert(writes==8 && (votes&(1u<<17)));
+ mode=3;renoir_bluetooth_init();assert(writes==8); /* Missing supplies: no controller changes. */
  assert(ended==workers);
+ renoir_bluetooth_stop();assert(!renoir_bt_running && !renoir_bt_wanted);
  puts("Bluetooth hardware survey: gates and powered-down UART avoidance passed");
 }

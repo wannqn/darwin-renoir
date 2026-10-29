@@ -20,23 +20,23 @@ struct renoir_bt_probe {
  void *context;
 };
 enum { RBT_IDLE, RBT_RESET, RBT_VERSION, RBT_ADDRESS, RBT_DONE, RBT_FAILED, RBT_QCA_VERSION, RBT_ROM_DONE };
-static void rbt_fail(struct renoir_bt_probe *p, uint8_t status)
+static inline void rbt_fail(struct renoir_bt_probe *p, uint8_t status)
 { p->state=RBT_FAILED; p->status=status; }
-static bool rbt_command(struct renoir_bt_probe *p, uint8_t state, uint16_t opcode)
+static inline bool rbt_command(struct renoir_bt_probe *p, uint8_t state, uint16_t opcode)
 {
  uint8_t cmd[]={1,(uint8_t)opcode,(uint8_t)(opcode>>8),0};
  p->state=state; p->opcode=opcode;
  if (!p->send || !p->send(p->context,cmd,sizeof(cmd))) { rbt_fail(p,0xff); return false; }
  return true;
 }
-static bool rbt_start(struct renoir_bt_probe *p)
+static inline bool rbt_start(struct renoir_bt_probe *p)
 {
  /* A running or failed instance must be explicitly reinitialized by its owner. */
  if(p->state!=RBT_IDLE)return false;
  return rbt_command(p,RBT_RESET,0x0c03);
 }
 /* Qualcomm WCN3991-and-newer ROM query. No firmware is chosen or downloaded. */
-static bool rbt_start_qca(struct renoir_bt_probe *p)
+static inline bool rbt_start_qca(struct renoir_bt_probe *p)
 {
  const uint8_t cmd[]={1,0,0xfc,1,0x19};
  if(p->state!=RBT_IDLE)return false;
@@ -44,8 +44,8 @@ static bool rbt_start_qca(struct renoir_bt_probe *p)
  if(!p->send || !p->send(p->context,cmd,sizeof(cmd))){rbt_fail(p,0xff);return false;}
  return true;
 }
-static uint16_t rbt_le16(const uint8_t *b) { return b[0]|(uint16_t)b[1]<<8; }
-static void rbt_event(struct renoir_bt_probe *p)
+static inline uint16_t rbt_le16(const uint8_t *b) { return b[0]|(uint16_t)b[1]<<8; }
+static inline void rbt_event(struct renoir_bt_probe *p)
 {
  const uint8_t *b=p->frame; uint8_t n=b[1];
  if(p->state==RBT_QCA_VERSION) {
@@ -54,7 +54,8 @@ static void rbt_event(struct renoir_bt_probe *p)
    return;
   }
   if(b[0]!=0x0e || n<3 || rbt_le16(b+3)!=0xfc00)return;
-  if(n!=18 || b[5]!=0 || b[6]!=0x19 || b[7]!=0){rbt_fail(p,0xfd);return;}
+  if(n!=18 || b[5]!=0 || b[6]!=0x19){rbt_fail(p,0xfd);return;}
+  /* QCA skips the extra byte after the EDL header; it is not HCI status. */
   p->product_id=rbt_le16(b+8)|(uint32_t)rbt_le16(b+10)<<16;
   p->patch_version=rbt_le16(b+12);p->rom_version=rbt_le16(b+14);
   p->soc_id=rbt_le16(b+16)|(uint32_t)rbt_le16(b+18)<<16;
@@ -86,7 +87,7 @@ static void rbt_event(struct renoir_bt_probe *p)
   p->state=RBT_DONE;
  }
 }
-static void rbt_feed(struct renoir_bt_probe *p,const uint8_t *data,size_t length)
+static inline void rbt_feed(struct renoir_bt_probe *p,const uint8_t *data,size_t length)
 {
  for(size_t i=0;i<length;i++) {
   uint8_t v=data[i];

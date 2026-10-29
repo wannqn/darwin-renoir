@@ -5152,6 +5152,7 @@ renoir_wifi_begin(void)
 static void
 renoir_wifi_stop(void)
 {
+	renoir_bluetooth_stop();
 	renoir_session_wanted=false;
 	for (unsigned ms=0;renoir_session_running && ms<40000;ms+=10) { sleep_ms(10); }
 	if (renoir_session_running) { tell("renoir-wifi: session did not finish before loader quiesce\n"); }

@@ -217,3 +217,82 @@ controller identity request: establish an accurate UART baud clock, validate
 existing shared supply votes, configure the UART/pins, enable only BT_EN,
 query the ROM and restore all temporary state. Firmware must be chosen from
 the actual controller response, not the device-tree name alone.
+
+## First physical controller response and firmware identification
+
+`bluetooth_probe=3` now configures the UART and its own pins, enables BT_EN
+temporarily, and sends the Qualcomm ROM-version request. It first requires
+the existing shared Wi-Fi supply votes, an idle UART, the measured QUP version,
+manual S7 clock control and a locked GPLL0. It does not change PLL settings,
+WLAN_EN or regulator votes. S7's private M/N/D clock is configured to 7.3728 MHz
+(300 MHz parent * 384/15625), giving 115200 baud at 16x sampling and divider 4.
+The UART and pin configuration, BT_EN and S7 RCG are restored on exit; the
+outer probe removes its temporary UART clock vote.
+
+The first query received 22 bytes but failed because the initial parser
+incorrectly required zero in the extra byte after the EDL response header.
+Linux's QCA reference skips that byte, rather than treating it as HCI status.
+The retry also exposed startup timing: the supplies were not always ready at
+30 seconds. The worker now waits for the temporary Wi-Fi transport prerequisite
+for up to 180 additional seconds. The final intended driver must support
+Bluetooth independently; this prerequisite is only for the current probe.
+
+The next physical run returned this non-personal controller identity packet:
+
+```text
+00 04 0e 12 01 00 fc 00 19 0c 13 00 00 00 f3 17 00 02 00 02 0c 40
+```
+
+The leading NUL is ignored as power-on noise; the extra byte is `0x0c` (the
+12-byte identity length). Decoded controller identity:
+
+| Field | Value |
+| --- | --- |
+| Product | `0x13` |
+| SoC | `0x400c0200` |
+| ROM | `0x0200` |
+| Current patch | `0x17f3` |
+
+The exact packet is now a framing regression fixture tested across all chunk
+sizes. Cleanup reported UART idle, original RCG readback, BT_EN low and the
+temporary UART vote removed with the branch clock off. Pin/UART register
+restoration paths are also tested in a register model; not every restored
+configuration register was printed in this hardware trace. The running RAM
+session uses this stable-display-source test kernel with the one-shot probe
+finished. The normal prebuilt was not replaced.
+
+Kernel SHA256 `bb0a133f963b0e5c721cfa1689cbddddd9f8c1be220edbc6f7a8e28f72879eec`.
+Evidence stays ignored in `recovery/assets/bluetooth-query-ready.log`. Earlier
+failed/timing runs remain in `bluetooth-query.log` and
+`bluetooth-query-layout.log`. No observed panic in the collected probe logs.
+
+RAM shutdown/Wi-Fi stop now cancels waiting and receiving, waits for probe
+cleanup, then lets Wi-Fi release shared supplies. Tests cover cancellation
+during a silent-controller wait. The inactive default does no hardware work.
+
+### Stock firmware inputs, downloaded but not loaded
+
+The measured ROM maps to firmware suffix `20` under Linux QCA's selection
+logic. The current Linux firmware set does not contain that revision. The
+Renoir vendor image was retrieved instead from
+[TheMuppets Renoir vendor source](https://github.com/TheMuppets/proprietary_vendor_xiaomi_renoir/tree/lineage-23.2/radio).
+Its LFS pointer identifies `bluetooth.img` as 1,355,776 bytes, SHA256
+`eff10a7b32c8b5278e03f46341ad825b35e1bd6e47f0df7ac54317919f5689fe`;
+the download matched. The public LFS host is specified by the source
+repository's `.lfsconfig`. No download authorization URL is recorded here.
+
+The source image is a trimmed FAT image whose header declares 64 MiB. A
+separate working copy was extended with zeroes to that size; the verified
+original was preserved. `7z t` passes on the working copy, and extraction
+produced `image/hpbtfw20.tlv` plus `hpnv20.bin` and board-specific NVM files.
+All inputs remain under ignored `build-tools/`; nothing was flashed.
+
+- Patch file: 197,376 bytes, SHA256
+  `a1ada555743d4cd4696e0e7e24348c5cb039cba0ed09aeb39068ba4992e0a60c`.
+- Version: `BTFW.HSP.2.0.0-00602-HSP_PATCHZ-1.19809.3`.
+- TLV header matches product `0x13` and ROM `0x0200`; patch `0x3fc0`,
+  download mode 3. No firmware has been downloaded to the controller yet.
+
+Next work is board-ID/NVM selection and a bounded, checked RAM firmware loader,
+then the real iOS UART device and Bluetooth service. Neither Settings
+availability, pairing nor headphone/speaker audio has been established.

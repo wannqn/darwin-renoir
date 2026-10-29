@@ -48,6 +48,16 @@ int main(void) {
  assert(p.product_id==0x11223344 && p.rom_version==0x21 && p.soc_id==0x40014320);
  assert(p.patch_version==2 && w.count==1);
  p=(struct renoir_bt_probe){0};p.send=send_cmd;p.context=&w;assert(rbt_start_qca(&p));
- rom[8]=1;feed(&p,rom,sizeof(rom),1);assert(p.state==RBT_FAILED);
+ rom[8]=0xa5;feed(&p,rom,sizeof(rom),1);assert(p.state==RBT_ROM_DONE);
+ p=(struct renoir_bt_probe){0};p.send=send_cmd;p.context=&w;assert(rbt_start_qca(&p));
+ rom[7]=1;feed(&p,rom,sizeof(rom),1);assert(p.state==RBT_FAILED);
+ /* Exact non-personal identity reply captured from the physical Renoir.
+  * Initial power-on NUL is noise; 0x0c after the EDL header is payload length. */
+ const uint8_t captured[]={0,4,14,18,1,0,0xfc,0,0x19,0x0c,0x13,0,0,0,0xf3,0x17,0,2,0,2,0x0c,0x40};
+ for(unsigned chunk=1;chunk<=sizeof(captured);chunk++){
+  p=(struct renoir_bt_probe){0};p.send=send_cmd;p.context=&w;assert(rbt_start_qca(&p));
+  feed(&p,captured,sizeof(captured),chunk);assert(p.state==RBT_ROM_DONE);
+  assert(p.product_id==0x13 && p.soc_id==0x400c0200 && p.rom_version==0x200 && p.patch_version==0x17f3);
+ }
  puts("H4 probe: fragmentation, framing, identity, flow control and failure tests passed");
 }
