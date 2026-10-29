@@ -298,3 +298,11 @@ kernel remains preserved too. Archived SHARE root/system images are unchanged;
 userland was not rebuilt. No phone was available in fastboot during these
 checks, so Wi-Fi association and Safari on this combined kernel still require
 hardware validation. No partition was written and no release asset replaced.
+
+Subsequent hardware check: a full cold RAM boot completed successfully after
+the phone became available. The system upload took 97.126 seconds and the
+kernel/root upload took 1.963 seconds. The live log confirms early Wi-Fi buffer
+reservation, radio initialization and scanning on both 2.4 GHz and 5 GHz, with
+no panic observed in the collected log. WPA2 association and Safari results
+are still pending user confirmation. Evidence stays local in ignored
+`recovery/assets/wifi-integrated-first.log` and `wifi-integrated-live.log`.
