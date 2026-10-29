@@ -262,3 +262,39 @@ patch statusbar test passed (19 scripts total). The payload suite now has six
 tests, including repeated preparation of the incoming boot options. All 36
 prebuilt checksum entries match. These are host checks, not hardware validation
 of the incoming kernel.
+
+## Combined source rebuild after connection regression (2026-10-29)
+
+The user reported that Wi-Fi did not connect with the incoming 90 Hz prebuilt.
+A fresh Apple XNU tree was created from the locally available pinned tag, then
+the complete current `xnu/renoir.patch` and `xnu/files` were applied. The old
+working source tree was preserved. Both ath11k and XNU were rebuilt from current
+sources, rather than reusing the incoming binary or the older kernel objects.
+
+```sh
+source build-tools/env.sh
+export XNU_SRC="$PWD/xnu-src/renoir-integrated-20261029"
+# Initial setup used xnu/apply.sh with the local pinned Apple source as XNU_URL.
+bash tools/mk-ath11k.sh
+./xnu-build.sh -j6 DSYMUTIL="$PWD/build-tools/host-root/usr/bin/dsymutil"
+```
+
+Both builds exited successfully. Ath11k reports zero generated function stubs;
+the linked kernel contains `_ath11k_core_init` and `_lx_station_join`. The new
+prebuilt combines the pulled display/GPU changes with the existing Wi-Fi source
+fixes. The canonical boot helper already loads this prebuilt by default.
+
+- Kernel: 15,440,112 bytes, SHA256
+  `a2ed0c6dd1456c09d339da3d8d5b55d3c39f56f464888dbd9e3ab9986bf26af3`.
+- Local generic SHARE payload: 56,744,632 bytes, SHA256
+  `9a1154c3af7154dc39d6baf3db76ed6cba018a5629de2032ef0687eed089e0c0`.
+- Build logs: `build-tools/ath11k-integrated-build.log` and
+  `build-tools/xnu-integrated-build.log` (ignored).
+
+All 19 selected recovery/Wi-Fi/statusbar host test scripts passed, and all 36
+prebuilt checksum entries match. The incoming 90 Hz prebuilt is preserved in
+ignored `recovery/assets/incoming-90hz-2aff3b5.kernel`; the earlier Wi-Fi-tested
+kernel remains preserved too. Archived SHARE root/system images are unchanged;
+userland was not rebuilt. No phone was available in fastboot during these
+checks, so Wi-Fi association and Safari on this combined kernel still require
+hardware validation. No partition was written and no release asset replaced.

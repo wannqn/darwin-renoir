@@ -1,6 +1,6 @@
-Kernel updated by 2aff3b5 for 90 Hz; other snapshots retained from 2026-10-22.
+Kernel rebuilt 2026-10-29 from d06f57c with incoming 90 Hz changes and Renoir Wi-Fi fixes; other snapshots retained from 2026-10-22.
 
-bc75167eaa58c1343f56db1b36e467fbfa8580a294e290d2dac4eb58355c4327  prebuilt/mach.development.bcm2837
+a2ed0c6dd1456c09d339da3d8d5b55d3c39f56f464888dbd9e3ab9986bf26af3  prebuilt/mach.development.bcm2837
 9bec1fa2e2762d8370a7052c7371b28167db8444d2bcc938f502253ea11f5450  prebuilt/loader.efi
 cab0c58744bd9e4490ef4b9aabfe25758838a35279d1384d382e60e8653c91c3  prebuilt/userland/child
 1a413befd511384052e1962c1394adce20f718e1f2657ce63ab09828ebc4bd1b  prebuilt/userland/cpu_test
