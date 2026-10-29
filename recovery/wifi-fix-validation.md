@@ -236,3 +236,29 @@ Publication scope: source, tests, documentation and the tested prebuilt kernel
 on the private GitHub `wannqn/darwin-renoir` backup's `renoir` branch. Release
 assets remain unchanged. Runtime logs, personal network configuration and build
 caches stay ignored. No phone partition operation was performed.
+
+## Integration of the 90 Hz updates (2026-10-29)
+
+Fast-forwarded the private GitHub backup through `2aff3b5`, including driver
+cleanup, the `renoir.patch` rename, Adreno/display changes and the replacement
+90 Hz prebuilt kernel. The Wi-Fi source fixes and interactive MAC prompt remain
+in place. The recovery payload now also receives the incoming CPU, touch and
+framebuffer boot options.
+
+The current default kernel is the incoming prebuilt, SHA256
+`bc75167eaa58c1343f56db1b36e467fbfa8580a294e290d2dac4eb58355c4327`.
+The earlier Wi-Fi-tested kernel (`2ba66e7e…`) is preserved locally in the
+pre-integration Git stash and ignored recovery assets. Earlier hardware results
+above apply to that earlier kernel; the incoming 90 Hz kernel has not been
+validated on this handset in this integration session. The checksum manifest
+was corrected to match the incoming binary. No phone operation or release
+asset replacement was performed.
+
+The original GitLab remote could not be checked without credentials. This
+integration includes the four new commits available on `origin/renoir`.
+
+Integration validation: all 18 recovery/Wi-Fi host test scripts and the renamed
+patch statusbar test passed (19 scripts total). The payload suite now has six
+tests, including repeated preparation of the incoming boot options. All 36
+prebuilt checksum entries match. These are host checks, not hardware validation
+of the incoming kernel.

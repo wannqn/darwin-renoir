@@ -1,6 +1,6 @@
-Built 2026-10-22 18:07 from this tree.
+Kernel updated by 2aff3b5 for 90 Hz; other snapshots retained from 2026-10-22.
 
-c579b3d931c9ec945a4efbaf417ae107d5b35ef112a1e902d3004f42c4c967dd  prebuilt/mach.development.bcm2837
+bc75167eaa58c1343f56db1b36e467fbfa8580a294e290d2dac4eb58355c4327  prebuilt/mach.development.bcm2837
 9bec1fa2e2762d8370a7052c7371b28167db8444d2bcc938f502253ea11f5450  prebuilt/loader.efi
 cab0c58744bd9e4490ef4b9aabfe25758838a35279d1384d382e60e8653c91c3  prebuilt/userland/child
 1a413befd511384052e1962c1394adce20f718e1f2657ce63ab09828ebc4bd1b  prebuilt/userland/cpu_test
