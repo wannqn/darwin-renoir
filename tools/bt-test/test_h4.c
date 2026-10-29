@@ -4,7 +4,7 @@
 #include "../../xnu/files/bsd/dev/renoir_bt_h4.h"
 struct wire { unsigned count; uint16_t op; bool fail; };
 static bool send_cmd(void *ctx,const uint8_t *b,size_t n) {
- struct wire *w=ctx;assert(b[0]==1);assert((n==4 && b[3]==0) || (n==5 && b[1]==0 && b[2]==0xfc && b[3]==1 && b[4]==0x19));w->op=rbt_le16(b+1);w->count++;return !w->fail;
+ struct wire *w=ctx;assert(b[0]==1);assert((n==4 && b[3]==0) || (n==5 && b[1]==0 && b[2]==0xfc && b[3]==1 && (b[4]==0x19 || b[4]==0x23)));w->op=rbt_le16(b+1);w->count++;return !w->fail;
 }
 static const uint8_t reset[]={4,14,4,1,3,12,0};
 static const uint8_t version[]={4,14,12,1,1,16,0,9,0x34,0x12,9,29,0,0x78,0x56};
@@ -59,5 +59,11 @@ int main(void) {
   feed(&p,captured,sizeof(captured),chunk);assert(p.state==RBT_ROM_DONE);
   assert(p.product_id==0x13 && p.soc_id==0x400c0200 && p.rom_version==0x200 && p.patch_version==0x17f3);
  }
+ p=(struct renoir_bt_probe){0};p.send=send_cmd;p.context=&w;assert(rbt_start_qca(&p));
+ feed(&p,captured,sizeof(captured),1);assert(!rbt_start_board(&p));
+ p.state=RBT_TLV_DONE;assert(rbt_start_board(&p));assert(!rbt_start_board(&p));
+ const uint8_t board[]={4,14,8,1,0,0xfc,0,0x23,2,0,0x8e};
+ feed(&p,captured,sizeof(captured),1);assert(p.state==RBT_QCA_BOARD);
+ feed(&p,board,sizeof(board),1);assert(p.state==RBT_BOARD_DONE && p.board_id==0x8e);
  puts("H4 probe: fragmentation, framing, identity, flow control and failure tests passed");
 }

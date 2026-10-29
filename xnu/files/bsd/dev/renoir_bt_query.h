@@ -8,7 +8,7 @@
 static uint32_t rbq_read(void *ctx,unsigned off){return rd((vm_offset_t)ctx+off);}
 static void rbq_write(void *ctx,unsigned off,uint32_t v){wr((vm_offset_t)ctx+off,v);}
 static void rbq_delay(void *ctx,unsigned us){(void)ctx;sleep_us(us);}
-static bool rbq_send(void *ctx,const uint8_t *b,size_t n){return rbt_geni_tx(ctx,b,n);}
+static bool rbq_send(void *ctx,const uint8_t *b,size_t n){return rbt_geni_stream_tx(ctx,b,n);}
 static bool rbq_rcg_update(vm_offset_t gcc)
 {
  wr(gcc+0x17860,rd(gcc+0x17860)|1);
@@ -25,9 +25,10 @@ renoir_bluetooth_query(vm_offset_t gcc,vm_offset_t pins,vm_offset_t uart,uint32_
   * under the existing RPMh lock, but do not change a regulator vote here. */
  static const char *const rail[]={"smpb10","ldoc11","smpc2","smpb11","smpb12"};
  static const uint32_t minimum[]={1800,2800,950,1880,1350};
+ static const uint32_t maximum[]={1800,2800,952,2040,1350};
  for(unsigned i=0;i<5;i++){
   uint32_t mv,on;
-  if(!renoir_rpmh_read(rail[i],0,&mv) || !renoir_rpmh_read(rail[i],4,&on) || !(on&1) || (mv&8191)<minimum[i]){
+  if(!renoir_rpmh_read(rail[i],0,&mv) || !renoir_rpmh_read(rail[i],4,&on) || !(on&1) || ((mv&8191)<minimum[i] || (mv&8191)>maximum[i])){
    printf("renoir-bt: controller query refused: existing %s supply vote not ready\n",rail[i]);return;
   }
  }
@@ -86,6 +87,9 @@ renoir_bluetooth_query(vm_offset_t gcc,vm_offset_t pins,vm_offset_t uart,uint32_
  if(probe.state==RBT_ROM_DONE){
   printf("renoir-bt: QCA ROM identity: product %#x SOC %#x ROM %#x patch %#x\n",
    probe.product_id,probe.soc_id,probe.rom_version,probe.patch_version);
+
+  /* Board-ID is deliberately not queried before a checked patch transfer. */
+
  }else{
   printf("renoir-bt: ROM query incomplete: state %u error %#x bytes %u UART %#x IRQ %#x/%#x RX %#x CTS %u\n",
    probe.state,probe.status,received,rd(uart+0x40),rd(uart+0x610),rd(uart+0x640),rd(uart+0x804),rd(pins+68*0x1000+4)&1);

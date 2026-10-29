@@ -77,6 +77,17 @@ static inline bool rbt_geni_tx(struct rbt_geni *u,const uint8_t *data,size_t siz
  (void)rbt_geni_wait(u,0x610,1u<<5,1u<<5);
  u->write(u->ctx,0x618,1u<<5);u->ready=false;return false;
 }
+/* Preserve one H4 byte stream across bounded hardware FIFO transfers. */
+static inline bool rbt_geni_stream_tx(struct rbt_geni *u,const uint8_t *data,size_t size)
+{
+ if(!u->ready || !data || !size || size>65540 || !u->depth)return false;
+ while(size){
+  size_t count=size;if(count>4*u->depth)count=4*u->depth;
+  if(!rbt_geni_tx(u,data,count))return false;
+  data+=count;size-=count;
+ }
+ return true;
+}
 /* One FIFO snapshot, bounded by advertised hardware capacity. */
 static inline int rbt_geni_rx(struct rbt_geni *u,uint8_t *out,size_t capacity)
 {

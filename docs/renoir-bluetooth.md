@@ -296,3 +296,63 @@ All inputs remain under ignored `build-tools/`; nothing was flashed.
 Next work is board-ID/NVM selection and a bounded, checked RAM firmware loader,
 then the real iOS UART device and Bluetooth service. Neither Settings
 availability, pairing nor headphone/speaker audio has been established.
+
+## Reset during the pre-firmware board-ID experiment
+
+A separate RAM candidate attempted the board-ID request (`0xfc00/0x23`)
+immediately after ROM identification. The user opened Settings, observed a
+freeze and an unexpected full reset. Host USB events confirmed disconnect
+followed by stock Android fastboot. No probe log was captured before that reset,
+so the exact kernel/controller failure and its cause remain unproven. This is
+a failed experiment, not a successful board-ID measurement. Do not boot its
+ignored `bluetooth-board.*` candidate as a working build. Candidate kernel
+SHA256: `0045265db44feaef615b5f4186b697fc96243c7f2db5f2e82c7b0b9dff25183a`.
+
+The known-working default kernel/root was restored with a complete cold RAM
+boot: system upload 95.520 seconds, kernel/root 1.940 seconds. The user explicitly
+confirmed Settings opens normally and the phone stays running afterward. The
+default kernel still hashes to `2ba66e7e…`. No partition operation was performed.
+
+The board query was removed from the current ROM-only probe path. Its protocol
+API now refuses to send before a completed TLV transfer, matching the reference
+QCA ordering (board ID after patch loading). Host tests assert this pre-firmware
+refusal. No additional experimental phone boot was performed after restoration
+in this checkpoint. The board ID and correct board-specific NVM remain unknown.
+
+## Offline firmware-transfer implementation
+
+`renoir_bt_firmware.h` now supplies bounded patch/NVM validation and transfer
+logic, not yet connected to an active phone boot mode:
+
+- Validate exact TLV lengths, patch product/ROM, payload bounds and supported
+  response modes before transmission.
+- Segment into at most 243 firmware bytes per vendor command, wait for each
+  response in mode 0 or the final response in mode 3, and bound silent-controller
+  waits. Reject malformed/error replies and stop on cancellation.
+- Require checked board selection before NVM transfer. Validate all NVM tag
+  bounds and required transport/address/sleep tags before editing a private
+  RAM copy. Source files stay unchanged. Initial bring-up can keep the controller
+  awake and at the chosen UART rate; power management/audio remain future work.
+- Split a long H4 packet across bounded GENI FIFO writes without inserting
+  another H4 header. This is necessary for the 249-byte full vendor command,
+  which exceeds the 64-byte TX FIFO.
+
+The five host suites pass with ASan/UBSan, including standard/QCA parsing, survey
+gates, GENI FIFO byte preservation, transaction rollback and firmware transfer.
+Firmware tests cover per-segment/final-only ACK behavior, wrong product/ROM,
+truncated TLVs, silent-controller timeout, send failure, cancellation, NVM
+preconditions and preparation without writes on invalid input. An ARM64 iOS
+freestanding wrapper compiles the transfer and preparation code with warnings
+treated as errors. The kernel builds with the pre-firmware board query disabled.
+Recovery boot/payload and Wi-Fi-start tests pass.
+
+All 66 stock patch/NVM files extracted from the verified vendor image passed
+the C validator. The NVM HCI tag uses baud code `0x11` (3.2 Mbaud) in the stock
+image; this must be coordinated with the host UART rate when eventually applied.
+Only offline validation was performed: no patch or NVM transfer has been made
+to the physical controller, and no iOS Bluetooth service/device was enabled.
+
+Next: integrate a patch-only RAM test with early host log capture, verify its
+response/version, then request board ID in the reference order and select NVM.
+The current stable phone session must remain intact until that separate
+experimental build is prepared and checked.

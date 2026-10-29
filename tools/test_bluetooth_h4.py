@@ -9,7 +9,7 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='renoir-bt-') as tmp:
     compiler = shlex.split(os.environ.get('CC', 'cc'))
-    for name in ('h4', 'survey', 'geni', 'query'):
+    for name in ('h4', 'survey', 'geni', 'query', 'firmware'):
         exe = Path(tmp) / ('test-' + name)
         subprocess.run(compiler + ['-std=c11', '-Wall', '-Wextra', '-Werror',
                    '-fsanitize=address,undefined', '-g',

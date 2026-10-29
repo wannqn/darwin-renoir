@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "../../xnu/files/bsd/dev/renoir_bt_geni.h"
-struct model {uint32_t regs[1024];unsigned writes,delays,pops;bool stuck;};
+struct model {uint32_t regs[1024];unsigned writes,delays,pops,remaining,output_size;uint8_t output[512];bool stuck;};
 static uint32_t read_reg(void *ctx,unsigned off){
  struct model *m=ctx;assert(off<4096 && !(off&3));
  if(off==0x610)return m->stuck?0:1;
@@ -11,6 +11,10 @@ static uint32_t read_reg(void *ctx,unsigned off){
 }
 static void write_reg(void *ctx,unsigned off,uint32_t value){
  struct model *m=ctx;assert(off<4096 && !(off&3));m->regs[off/4]=value;m->writes++;
+ if(off==0x270)m->remaining=value;
+ if(off==0x700)for(unsigned i=0;i<4 && m->remaining;i++){
+  assert(m->output_size<sizeof(m->output));m->output[m->output_size++]=(uint8_t)(value>>(8*i));m->remaining--;
+ }
 }
 static void delay(void *ctx,unsigned us){struct model *m=ctx;assert(us==50);m->delays++;}
 static struct rbt_geni fresh(struct model *m){
@@ -37,5 +41,9 @@ int main(void){
  u=fresh(&m);assert(rbt_geni_configure(&u,7372800,0,32,115200));
  m.stuck=true;assert(!rbt_geni_tx(&u,cmd,sizeof(cmd)) && !u.ready);
  assert(m.delays==2000 && m.regs[0x604/4]==2);
+ u=fresh(&m);assert(rbt_geni_configure(&u,7372800,0,16,115200));
+ uint8_t stream[300];for(unsigned i=0;i<sizeof(stream);i++)stream[i]=(uint8_t)i;
+ assert(rbt_geni_stream_tx(&u,stream,sizeof(stream)) && m.output_size==sizeof(stream));
+ assert(!memcmp(m.output,stream,sizeof(stream)) && !m.remaining);
  puts("GENI FIFO: configuration gates, byte packing, partial RX and bounded timeout tests passed");
 }

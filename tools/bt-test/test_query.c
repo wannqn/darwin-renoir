@@ -14,16 +14,20 @@ static bool cancel_query;
 static bool supplies,rcg_stuck,tx_stuck,no_reply;
 static unsigned writes,txwords,rxwords,rxpos,waits;
 static bool available;
-static const uint8_t reply[]={4,14,18,1,0,0xfc,0,0x19,0,0x44,0x33,0x22,0x11,2,0,0x21,0,0x20,0x43,1,0x40};
+static const uint8_t rom_reply[]={4,14,18,1,0,0xfc,0,0x19,0,0x44,0x33,0x22,0x11,2,0,0x21,0,0x20,0x43,1,0x40};
+static const uint8_t board_reply[]={4,14,8,1,0,0xfc,0,0x23,2,0,0x8e};
+static const uint8_t *reply=rom_reply;
+static size_t reply_size=sizeof(rom_reply);
+static unsigned packet_words;
 static uint32_t rd(vm_offset_t p){
  if(p>=G && p<G+sizeof(gcc))return gcc[(p-G)/4];
  if(p>=U && p<U+sizeof(uart)){
   unsigned off=p-U;
-  if(off==0x804)return available?(1u<<31|1u<<28|6):0;
+  if(off==0x804)return available?(1u<<31|(uint32_t)(reply_size%4)<<28|(uint32_t)((reply_size+3)/4)):0;
   if(off==0x780){
    uint32_t v=0;rxwords++;
-   for(unsigned i=0;i<4;i++){if(rxpos<sizeof(reply))v|=(uint32_t)reply[rxpos]<<(8*i);rxpos++;}
-   if(rxpos>=sizeof(reply))available=false;
+   for(unsigned i=0;i<4;i++){if(rxpos<reply_size)v|=(uint32_t)reply[rxpos]<<(8*i);rxpos++;}
+   if(rxpos>=reply_size)available=false;
    return v;
   }
   return uart[off/4];
@@ -40,14 +44,15 @@ static void wr(vm_offset_t p,uint32_t value){
  if(p>=U && p<U+sizeof(uart)){
   unsigned off=p-U;
   if(off==0x630){assert(value==1u<<27);uart[0x40/4]|=0x1000;return;}
-  if(off==0x600){uart[0x40/4]|=1;return;}
+  if(off==0x600){uart[0x40/4]|=1;packet_words=0;return;}
   if(off==0x604){uart[0x40/4]&=~1u;uart[0x610/4]|=1u<<5;return;}
   if(off==0x634){uart[0x40/4]&=~0x1000u;return;}
   if(off==0x618){uart[0x610/4]&=~value;return;}
   if(off==0x648){uart[0x640/4]&=~value;return;}
   if(off==0x700){
-   assert(value==(txwords?0x19:0x01fc0001));txwords++;
-   if(txwords==2 && !tx_stuck){uart[0x610/4]|=1;uart[0x40/4]&=~1u;available=!no_reply;}
+   assert(packet_words?(value==0x19 || value==0x23):value==0x01fc0001);txwords++;packet_words++;
+   if(packet_words==2 && !tx_stuck){
+    reply=value==0x19?rom_reply:board_reply;reply_size=value==0x19?sizeof(rom_reply):sizeof(board_reply);rxpos=0;uart[0x610/4]|=1;uart[0x40/4]&=~1u;available=!no_reply;}
    return;
   }
   uart[off/4]=value;return;
@@ -72,7 +77,7 @@ static void fresh(void){
  uart[0x68/4]=0x204;uart[0xe24/4]=0x20102864;uart[0xe28/4]=0x20204800;uart[0x48/4]=0x11;
  pin[65][0]=1;for(unsigned i=68;i<=71;i++)pin[i][0]=i==70?3:1;
  pin[64][0]=0x3c3;pin[64][1]=3;
- renoir_bt_wanted=true;cancel_query=false;supplies=true;rcg_stuck=tx_stuck=no_reply=available=false;writes=txwords=rxwords=rxpos=waits=0;
+ renoir_bt_wanted=true;cancel_query=false;supplies=true;rcg_stuck=tx_stuck=no_reply=available=false;writes=txwords=rxwords=rxpos=waits=packet_words=0;reply=rom_reply;reply_size=sizeof(rom_reply);
 }
 static void restored(void){
  assert(gcc[0x17864/4]==0x100000 && gcc[0x17868/4]==27 && gcc[0x1786c/4]==42 && gcc[0x17870/4]==51);

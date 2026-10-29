@@ -12,14 +12,15 @@ struct renoir_bt_probe {
  uint8_t frame[258];
  uint32_t have, need, discard;
  uint8_t type, state, status, hci_version, lmp_version;
- uint16_t opcode, revision, manufacturer, subversion;
+ uint16_t opcode, revision, manufacturer, subversion, board_id;
+ uint8_t credits;
  uint32_t product_id, soc_id;
  uint16_t patch_version, rom_version;
  uint8_t address[6]; /* HCI order, least significant byte first */
  bool (*send)(void *, const uint8_t *, size_t);
  void *context;
 };
-enum { RBT_IDLE, RBT_RESET, RBT_VERSION, RBT_ADDRESS, RBT_DONE, RBT_FAILED, RBT_QCA_VERSION, RBT_ROM_DONE };
+enum { RBT_IDLE, RBT_RESET, RBT_VERSION, RBT_ADDRESS, RBT_DONE, RBT_FAILED, RBT_QCA_VERSION, RBT_ROM_DONE, RBT_QCA_BOARD, RBT_BOARD_DONE, RBT_TLV_STREAM, RBT_TLV_WAIT, RBT_TLV_DONE };
 static inline void rbt_fail(struct renoir_bt_probe *p, uint8_t status)
 { p->state=RBT_FAILED; p->status=status; }
 static inline bool rbt_command(struct renoir_bt_probe *p, uint8_t state, uint16_t opcode)
@@ -44,10 +45,43 @@ static inline bool rbt_start_qca(struct renoir_bt_probe *p)
  if(!p->send || !p->send(p->context,cmd,sizeof(cmd))){rbt_fail(p,0xff);return false;}
  return true;
 }
+/* QCA reference queries board ID after patch loading, never in bare ROM. */
+static inline bool rbt_start_board(struct renoir_bt_probe *p)
+{
+ const uint8_t cmd[]={1,0,0xfc,1,0x23};
+ if(p->state!=RBT_TLV_DONE || !p->credits)return false;
+ p->state=RBT_QCA_BOARD;p->opcode=0xfc00;p->credits--;
+ if(!p->send || !p->send(p->context,cmd,sizeof(cmd))){rbt_fail(p,0xff);return false;}
+ return true;
+}
+static inline bool rbt_tlv_segment(struct renoir_bt_probe *p,const uint8_t *data,size_t n,bool wait)
+{
+ if(!data || !n || n>243 || (p->state!=RBT_ROM_DONE && p->state!=RBT_BOARD_DONE &&
+    p->state!=RBT_TLV_STREAM && p->state!=RBT_TLV_DONE))return false;
+ uint8_t cmd[249]={1,0,0xfc,(uint8_t)(n+2),0x1e,(uint8_t)n};
+ for(size_t i=0;i<n;i++)cmd[6+i]=data[i];
+ p->state=wait?RBT_TLV_WAIT:RBT_TLV_STREAM;p->opcode=0xfc00;
+ if(!p->send || !p->send(p->context,cmd,n+6)){rbt_fail(p,0xff);return false;}
+ return true;
+}
 static inline uint16_t rbt_le16(const uint8_t *b) { return b[0]|(uint16_t)b[1]<<8; }
 static inline void rbt_event(struct renoir_bt_probe *p)
 {
  const uint8_t *b=p->frame; uint8_t n=b[1];
+ if(p->state==RBT_TLV_WAIT || p->state==RBT_TLV_STREAM){
+  if(b[0]==0x0f && n==4 && rbt_le16(b+4)==0xfc00){if(b[2])rbt_fail(p,b[2]);return;}
+  if(b[0]!=0x0e || n<3 || rbt_le16(b+3)!=0xfc00)return;
+  if(n>=5 && (b[6]==0x19 || b[6]==0x23))return; /* Delayed identity response. */
+  if(n!=5 || b[5]!=0 || b[6]!=0x1e || p->state==RBT_TLV_STREAM){rbt_fail(p,0xfd);return;}
+  p->credits=b[2];p->state=RBT_TLV_DONE;return;
+ }
+ if(p->state==RBT_QCA_BOARD) {
+  if(b[0]==0x0f && n==4 && rbt_le16(b+4)==0xfc00){if(b[2])rbt_fail(p,b[2]);return;}
+  if(b[0]!=0x0e || n<3 || rbt_le16(b+3)!=0xfc00)return;
+  if(n>=5 && b[6]==0x19)return; /* Ignore a late ROM-version completion. */
+  if(n<8 || b[5]!=0 || b[6]!=0x23){rbt_fail(p,0xfd);return;}
+  p->credits=b[2];p->board_id=(uint16_t)b[8]<<8|b[9];p->state=RBT_BOARD_DONE;return;
+ }
  if(p->state==RBT_QCA_VERSION) {
   if(b[0]==0x0f && n==4 && rbt_le16(b+4)==0xfc00) {
    if(b[2])rbt_fail(p,b[2]);
@@ -60,7 +94,7 @@ static inline void rbt_event(struct renoir_bt_probe *p)
   p->patch_version=rbt_le16(b+12);p->rom_version=rbt_le16(b+14);
   p->soc_id=rbt_le16(b+16)|(uint32_t)rbt_le16(b+18)<<16;
   if(!p->rom_version || !p->soc_id){rbt_fail(p,0xfd);return;}
-  p->state=RBT_ROM_DONE;return;
+  p->credits=b[2];p->state=RBT_ROM_DONE;return;
  }
  if(p->state<RBT_RESET || p->state>RBT_ADDRESS)return;
  if(b[0]==0x0f && n==4 && rbt_le16(b+4)==p->opcode) {
