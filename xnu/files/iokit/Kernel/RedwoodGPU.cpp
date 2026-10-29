@@ -387,10 +387,10 @@ struct gpu_kept {
 	uint64_t                        address, size, since;
 	uint32_t                        flags;
 };
-#define GPU_KEPT                48
+#define GPU_KEPT                128
 #define GPU_KEPT_BYTES          (160ull << 20)
 #define GPU_KEPT_SECONDS        60              /* a buffer not asked for again in so long is let go */
-#define GPU_KEEP_FROM           (256u << 10)    /* bytes: smaller ones are not worth it */
+#define GPU_KEEP_FROM           0               /* keep all buffers including small UI textures */
 static TUNABLE(uint32_t, gGPUKeep, "gpu_keep", 1);      /* boot-arg gpu_keep=0 (a test): none kept; gpu_keep=2: kept ones cleared when given again */
 
 class RedwoodGPUUserClient : public IOUserClient

@@ -46,6 +46,10 @@ def prepare(data, epoch, wifi_mac=None, kernel=None):
         offset = end
         if key == b'cmdline':
             words = body.rstrip(b'\0').decode().split()
+            words = ['cpus=8' if w.startswith('cpus=') else w for w in words]
+            for opt in ('touch_lat=1', 'fb_filter=0'):
+                if opt not in words:
+                    words.append(opt)
             replaced = ('epoch=',) if wifi_mac is None else ('epoch=', 'wifi_mac=')
             words = [word for word in words if not word.startswith(replaced)]
             words.append('epoch=' + str(int(epoch)))

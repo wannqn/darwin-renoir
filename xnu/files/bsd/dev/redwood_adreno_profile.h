@@ -11,7 +11,7 @@ struct adreno_board_profile {
 	uint32_t speed_fuse, gaming_fuse, highest_bank_bit;
 	uint32_t gcc_debug_gpucc;
 	uint32_t speed_count, default_speed;
-	struct adreno_speed speeds[4];
+	struct adreno_speed speeds[6];
 };
 static const struct adreno_board_profile adreno_redwood = {
 	.board = "redwood", .model = "Adreno 642L", .firmware_directory = "fw",
@@ -28,9 +28,9 @@ static const struct adreno_board_profile adreno_renoir = {
 	.primitive_fifo = 0x00300000, .hang_cycles = 0x3ffff,
 	.speed_fuse = 0x1e1, .gaming_fuse = 0x1ed, .highest_bank_bit = 14,
 	.gcc_debug_gpucc = 0x13c, /* debugcc-shima.c: gpu_cc_debug_mux */
-	/* The bottom OPP is present in all four shima speed-bin tables. */
-	.speed_count = 2, .default_speed = 1,
-	.speeds = { {0, 0}, {285000, 64} },
+	/* Shima speed bin 105 OPPs: 285MHz (LOW_SVS), 365MHz (LOW_SVS_L1), 443MHz (SVS), 490MHz (SVS_L0). Default: 490MHz */
+	.speed_count = 5, .default_speed = 4,
+	.speeds = { {0, 0}, {285000, 64}, {365000, 80}, {443000, 128}, {490000, 144} },
 };
 
 /* A642's patch high nibble encodes target, not patch: GMU expects it in [31:28]. */

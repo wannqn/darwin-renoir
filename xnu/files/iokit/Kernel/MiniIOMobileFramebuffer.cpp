@@ -76,7 +76,7 @@ enum {
 
 #define kFBNotifyVSync          5
 #define kFBNotifyTypes          8
-#define kFBRefreshHz            60                      /* unless boot-arg fb_hz says otherwise */
+#define kFBRefreshHz            90                      /* 90 Hz default for Renoir AMOLED; overridable via fb_hz */
 
 #define FRAME_TIMES             64                      /* milliseconds told apart between two frames */
 #define FRAME_PAUSE             90                      /* from so many on, nothing was moving: not a slow frame */
@@ -152,7 +152,8 @@ static TUNABLE(uint32_t, gDiff, "fb_diff", 0);
  */
 static TUNABLE(uint32_t, gFilter, "fb_filter", 1);
 static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
-static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
+static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 0);
+static TUNABLE(uint32_t, gDoubleBuffer, "fb_double", 1);
 /*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
@@ -160,7 +161,7 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
  */
 static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
-static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
+static TUNABLE(uint32_t, gQueue, "fb_queue", 1);
 static inline unsigned
 swapQueue(void)
 {
@@ -228,6 +229,8 @@ class IOMobileFramebuffer : public IOService
 public:
 	IOLock *        fLock;
 	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
+	uint8_t *       fBackBuffer;            /* RAM backbuffer for tear-free double buffering */
+	IOBufferMemoryDescriptor * fBackBufferDescriptor;
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
 	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
 	MiniIOSurface * fDefaultSurface;
@@ -445,6 +448,25 @@ IOMobileFramebuffer::start(IOService * provider)
 	fDiffLeft = fDiffTop = ~0u;
 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
 	    fPanelWidth, fPanelHeight, fRowBytes);
+	if (gDoubleBuffer) {
+		vm_size_t backBufferSize = (vm_size_t) fPanelHeight * fRowBytes;
+		IOBufferMemoryDescriptor * memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+		    kIODirectionInOut, backBufferSize, 64);
+		if (memory != NULL) {
+			fBackBufferDescriptor = memory;
+			fBackBuffer = (uint8_t *) memory->getBytesNoCopy();
+			bzero(fBackBuffer, backBufferSize);
+			IOLog("MiniIOMobileFramebuffer: backbuffer allocated (%u KB) for double buffering\n",
+			    (unsigned) (backBufferSize >> 10));
+		} else {
+			IOLog("MiniIOMobileFramebuffer: backbuffer allocation failed, using direct framebuffer\n");
+			fBackBuffer = NULL;
+			fBackBufferDescriptor = NULL;
+		}
+	} else {
+		fBackBuffer = NULL;
+		fBackBufferDescriptor = NULL;
+	}
 
 	if (gRecSeconds != 0) {
 		/* one piece of physical memory: the loader will send it over USB as it lies */
@@ -612,7 +634,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 		if (y < 0 || (uint32_t) y >= fPanelHeight) {
 			continue;
 		}
-		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
+		to = (uint32_t *) ((fBackBuffer ? fBackBuffer : fBase) + (size_t) y * fRowBytes);
 		if (job->unscaled) {
 			/* not scaled at all */
 			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
@@ -1008,7 +1030,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			/* the bottom layer taken away: nothing is shown, the screen is black */
 			if (layer == 0 && (set & 1) && fGraphics) {
 				for (uint32_t y = 0; y < fPanelHeight; y++) {
-					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
+					bzero((fBackBuffer ? fBackBuffer : fBase) + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
 				}
 			}
 			continue;
@@ -1039,6 +1061,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 			}
 		}
+	}
+	if (fBackBuffer != NULL && fGraphics) {
+		memcpy(fBase, fBackBuffer, (size_t) fPanelHeight * fRowBytes);
 	}
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {

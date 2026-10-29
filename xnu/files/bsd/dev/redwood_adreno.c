@@ -2357,8 +2357,8 @@ step_core_power(void)
 	    !rail_vote(48, cx, cx_levels, mx, mx_levels, &perf.gmu[1].vote)) {  /* "minimum SVS", the vendor's choice */
 		return false;
 	}
-	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x, GMU %#x %#x\n", step, perf.gpu[0].vote, perf.gpu[1].vote,
-	    perf.gpu[2].vote, perf.gpu[3].vote, perf.gmu[0].vote, perf.gmu[1].vote);
+	printf("adreno: %u: votes: 3D core %#x %#x %#x %#x %#x, GMU %#x %#x\n", step, perf.gpu[0].vote, perf.gpu[1].vote,
+	    perf.gpu[2].vote, perf.gpu[3].vote, perf.gpu_levels > 4 ? perf.gpu[4].vote : 0, perf.gmu[0].vote, perf.gmu[1].vote);
 
 	bw.levels = 1;
 	bw.ddr_commands = 3;
@@ -3819,9 +3819,25 @@ redwood_adreno_init(void)
 		return;
 	}
 	if (gpu_profile == &adreno_renoir) {
-		printf("adreno: renoir A642 profile; hardware bring-up is experimental, starting at 285 MHz\n");
+		printf("adreno: renoir A642 profile (285, 365, 443, 490 MHz)\n");
 	}
 
+	/* Opt-in, read-only clock-state probe. MDP itself is deliberately not touched. */
+	uint32_t display_clock_probe = 0;
+	if (gpu_profile == &adreno_renoir && PE_parse_boot_argn("renoir_display_clocks", &display_clock_probe, sizeof(display_clock_probe)) && display_clock_probe) {
+		need(&gcc);
+		if (gcc.base) {
+			uint32_t cfg = rd(gcc.base + 0x27004);
+			printf("renoir-display-clocks: gcc display ahb %#x\n", cfg);
+			if (cfg & 1) {
+				vm_offset_t cc = ml_io_map(0x0af00000, 0x5000);
+				if (cc) {
+					uint32_t gdsc = rd(cc + 0x3000), ahb = rd(cc + 0x2080);
+					printf("renoir-display-clocks: gdsc %#x mdss ahb %#x\n", gdsc, ahb);
+				}
+			} else printf("renoir-display-clocks: upstream clock disabled; not reading DISPCC\n");
+		}
+	}
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only && gpu_profile == &adreno_redwood) {
 		display_probe();
 	}
