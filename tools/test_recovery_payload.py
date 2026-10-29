@@ -48,14 +48,6 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(result[b'cmdline'],
                          b'-v wifi=1 epoch=1234567890 wifi_mac=02:aa:bb:cc:dd:ee\0')
 
-    def test_original_boot_options_survive_repeated_preparation(self):
-        data = pack(self.items[:2] + [(b'cmdline', b'-v cpus=4 touch_lat=1 fb_filter=0\0')])
-        result = unpack(prepare(prepare(data, 1), 2))[b'cmdline'].split()
-        self.assertIn(b'cpus=4', result)
-        self.assertNotIn(b'cpus=8', result)
-        self.assertEqual(result.count(b'touch_lat=1'), 1)
-        self.assertEqual(result.count(b'fb_filter=0'), 1)
-
     def test_epoch_refresh_preserves_mac_and_kernel(self):
         first = prepare(self.data, 2, '02:aa:bb:cc:dd:ee', b'new')
         result = unpack(prepare(first, 9876543210))

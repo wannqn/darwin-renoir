@@ -4971,8 +4971,6 @@ renoir_wifi_init(void)
 
 static void renoir_wifi_begin(void);
 
-#include "renoir_bluetooth.h"
-
 void
 redwood_wifi_init(void)
 {
@@ -4980,7 +4978,6 @@ redwood_wifi_init(void)
 	uint64_t size = 0;
 	thread_t thread;
 
-	renoir_bluetooth_init();
 	PE_parse_boot_argn("wifi_step", &last_step, sizeof(last_step));
 	if (last_step == 0 && (!PE_parse_boot_argn("wifi", &on, sizeof(on)) || on == 0)) {
 		return;
@@ -5152,7 +5149,6 @@ renoir_wifi_begin(void)
 static void
 renoir_wifi_stop(void)
 {
-	renoir_bluetooth_stop();
 	renoir_session_wanted=false;
 	for (unsigned ms=0;renoir_session_running && ms<40000;ms+=10) { sleep_ms(10); }
 	if (renoir_session_running) { tell("renoir-wifi: session did not finish before loader quiesce\n"); }

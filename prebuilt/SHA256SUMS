@@ -1,6 +1,6 @@
-Default kernel restored 2026-10-29 to the earlier phone-tested Wi-Fi build after display artifacts; other snapshots retained from 2026-10-22.
+Built 2026-10-22 18:07 from this tree.
 
-2ba66e7ed92be213a371027e45a553aba9cfd0f3e22b4d67ff14c804d1e6c21b  prebuilt/mach.development.bcm2837
+c579b3d931c9ec945a4efbaf417ae107d5b35ef112a1e902d3004f42c4c967dd  prebuilt/mach.development.bcm2837
 9bec1fa2e2762d8370a7052c7371b28167db8444d2bcc938f502253ea11f5450  prebuilt/loader.efi
 cab0c58744bd9e4490ef4b9aabfe25758838a35279d1384d382e60e8653c91c3  prebuilt/userland/child
 1a413befd511384052e1962c1394adce20f718e1f2657ce63ab09828ebc4bd1b  prebuilt/userland/cpu_test
