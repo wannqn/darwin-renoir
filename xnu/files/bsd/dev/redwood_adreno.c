@@ -3613,22 +3613,34 @@ redwood_adreno_minute(void)
  * count although the register that enables them reads 0; the line counter goes from 0 to 2431,
  * 429 lines in 1.47 ms. (The first clock is found off again by the next kernel.)
  */
-static struct block dispcc = { "dispcc", 0x0af00000, 0x2000 };          /* dt: clock-controller@af00000 */
-static struct block disp_intf = { "intf1", 0x0ae36000, 0x300 };         /* dt: mdss_dsi0's mdp_intf_base */
-#define GCC_DISP_AHB_CBCR       0x27004
-#define DISPCC_MDSS_CORE_GDSCR  0x1004          /* dt: disp_cc_mdss_core_gdsc */
-#define DISPCC_MDSS_PCLK0_CBCR  0x1010
-#define DISPCC_MDSS_MDP_CBCR    0x1014
-#define DISPCC_MDSS_AHB_CBCR    0x1050
-#define INTF_TIMING_ENGINE_EN   0x000
-#define INTF_HSYNC_CTL          0x008           /* clocks a line << 16 | of which the pulse */
-#define INTF_VSYNC_PERIOD       0x00c           /* clocks a frame */
-#define INTF_DISPLAY_V_START    0x01c           /* clocks before the first line shown, and */
-#define INTF_DISPLAY_V_END      0x024           /* ... up to the last */
-#define INTF_DISPLAY_HCTL       0x03c
-#define INTF_FRAME_LINE_COUNT_EN 0x0a8
-#define INTF_FRAME_COUNT        0x0ac
-#define INTF_LINE_COUNT         0x0b0
+static struct block dispcc = { "dispcc", 0x0af00000, 0x4000 };          /* dt: clock-controller@af00000 */
+static struct block disp_intf;                                          /* the interface the panel hangs on */
+#define GCC_DISP_AHB_CBCR       0x27004         /* (both boards: gcc_disp_ahb_clk) */
+/*
+ * Where the clocks and the panel's interface are: Redwood's by its device tree (yupik), Renoir's by
+ * its own (shima: dispcc-shima.c, shima-gdsc.dtsi, shima-sde-common.dtsi: the DSI interfaces are
+ * intf1 and intf2 at 0x6b800 and 0x6c000 in the display block, not where Redwood has them).
+ */
+struct display_layout {
+	uint32_t core_gdscr, pclk0_cbcr, mdp_cbcr, ahb_cbcr;
+	uint32_t intf_page, intf_at;                    /* the interface's page, and its registers within it */
+};
+static const struct display_layout display_redwood = { 0x1004, 0x1010, 0x1014, 0x1050, 0x0ae36000, 0 };
+static const struct display_layout display_renoir = { 0x3000, 0x2004, 0x200c, 0x2080, 0x0ae6b000, 0x800 };
+static const struct display_layout *display = &display_redwood;
+#define DISPCC_MDSS_CORE_GDSCR  (display->core_gdscr)
+#define DISPCC_MDSS_PCLK0_CBCR  (display->pclk0_cbcr)
+#define DISPCC_MDSS_MDP_CBCR    (display->mdp_cbcr)
+#define DISPCC_MDSS_AHB_CBCR    (display->ahb_cbcr)
+#define INTF_TIMING_ENGINE_EN   (display->intf_at + 0x000)
+#define INTF_HSYNC_CTL          (display->intf_at + 0x008)      /* clocks a line << 16 | of which the pulse */
+#define INTF_VSYNC_PERIOD       (display->intf_at + 0x00c)      /* clocks a frame */
+#define INTF_DISPLAY_V_START    (display->intf_at + 0x01c)      /* clocks before the first line shown, and */
+#define INTF_DISPLAY_V_END      (display->intf_at + 0x024)      /* ... up to the last */
+#define INTF_DISPLAY_HCTL       (display->intf_at + 0x03c)
+#define INTF_FRAME_LINE_COUNT_EN (display->intf_at + 0x0a8)
+#define INTF_FRAME_COUNT        (display->intf_at + 0x0ac)
+#define INTF_LINE_COUNT         (display->intf_at + 0x0b0)
 
 static void
 display_probe(void)
@@ -3638,6 +3650,7 @@ display_probe(void)
 
 	step = newest_step = 0;
 	fine = 1;
+	disp_intf = (struct block){ "intf1", display->intf_page, 0x1000 };
 	announce("the display: has its clock controller its bus clock (gcc 0x127004; GCC answers always)");
 	if (get(&gcc, "disp_ahb_cbcr", GCC_DISP_AHB_CBCR) & CBCR_OFF) {
 		announce("turn the bus clock of the display's clock controller on (gcc 0x127004 bit 0: THE ONE WRITE)");
@@ -3665,7 +3678,7 @@ display_probe(void)
 	bus = get(&dispcc, "mdss_ahb_cbcr", DISPCC_MDSS_AHB_CBCR);
 	if (bus & CBCR_OFF) {
 		/* (seen: the power switch on, the display's own clock and the pixel clock running, this one off: 0x80000000) */
-		announce("turn the bus clock of the display block's registers on (dispcc 0xaf01050 bit 0: THE ONE WRITE THERE)");
+		announce("turn the bus clock of the display block's registers on (its dispcc register, bit 0: THE ONE WRITE THERE)");
 		put(&dispcc, "mdss_ahb_cbcr", DISPCC_MDSS_AHB_CBCR, bus | CBCR_ENABLE);
 		sleep_ms(10);
 		bus = get(&dispcc, "mdss_ahb_cbcr", DISPCC_MDSS_AHB_CBCR);
@@ -3675,7 +3688,7 @@ display_probe(void)
 		printf("adreno: 0: the bus clock of the display block's registers does not run (%#x): nothing more is read\n", bus);
 		goto out;
 	}
-	announce("the timing of the interface the panel hangs on (0xae36000: NOT READ BEFORE)");
+	announce("the timing of the interface the panel hangs on (intf1 of the display block)");
 	get(&disp_intf, "timing_engine_en", INTF_TIMING_ENGINE_EN);
 	line = get(&disp_intf, "hsync_ctl", INTF_HSYNC_CTL) >> 16;
 	frame = get(&disp_intf, "vsync_period", INTF_VSYNC_PERIOD);
@@ -3726,6 +3739,76 @@ display_probe(void)
 out:
 	fine = saved_fine;
 	newest_step = 0;
+}
+
+/*
+ * Where the panel's own refresh is, for the display driver (iokit/Kernel/MiniIOMobileFramebuffer.cpp,
+ * boot-arg fb_scan). Renoir's panel is a command-mode one (display_probe() there, 30 October: intf1's
+ * timing engine off, its frame counter counting 60.0 a second): at every tearing-effect edge of the
+ * panel the display controller reads the framebuffer out to it, about 8.6 ms, its line counter going
+ * 1 to 2400, and stands still at line 1 in between. The same chain of checks as display_probe() comes
+ * first, quietly: the clock controller's bus clock (GCC), the display block's power switch, the bus
+ * clock of its registers -- turned on where off, exactly the two writes display_probe() makes, nothing
+ * else written -- and every read after that looks again that the last of them still runs.
+ */
+static bool scan_ready;
+
+bool
+redwood_display_scan_start(void)
+{
+	uint32_t clock;
+
+	if (scan_ready) {
+		return true;
+	}
+	if (!redwood_board_is("renoir")) {
+		return false;                   /* (Redwood's is a video panel: not this) */
+	}
+	display = &display_renoir;
+	need(&gcc);
+	need(&dispcc);
+	if (gcc.base == 0 || dispcc.base == 0) {
+		return false;
+	}
+	clock = rd(gcc.base + GCC_DISP_AHB_CBCR);
+	if (!(clock & CBCR_ENABLE)) {
+		wr(gcc.base + GCC_DISP_AHB_CBCR, clock | CBCR_ENABLE);
+		sleep_ms(10);
+		if (!(rd(gcc.base + GCC_DISP_AHB_CBCR) & CBCR_ENABLE)) {
+			return false;
+		}
+	}
+	if (!(rd(dispcc.base + DISPCC_MDSS_CORE_GDSCR) & GDSC_POWER_ON)) {
+		return false;
+	}
+	clock = rd(dispcc.base + DISPCC_MDSS_AHB_CBCR);
+	if (clock & CBCR_OFF) {
+		wr(dispcc.base + DISPCC_MDSS_AHB_CBCR, clock | CBCR_ENABLE);
+		sleep_ms(10);
+		if (rd(dispcc.base + DISPCC_MDSS_AHB_CBCR) & CBCR_OFF) {
+			return false;
+		}
+	}
+	disp_intf = (struct block){ "intf1", display->intf_page, 0x1000 };
+	need(&disp_intf);
+	scan_ready = disp_intf.base != 0 && rd(disp_intf.base + INTF_TIMING_ENGINE_EN) == 0;
+	return scan_ready;
+}
+
+/* The panel interface's frame counter and the line it is reading out now (1 between frames). */
+bool
+redwood_display_scan(uint32_t *frame, uint32_t *line)
+{
+	if (!scan_ready) {
+		return false;
+	}
+	if (rd(dispcc.base + DISPCC_MDSS_AHB_CBCR) & CBCR_OFF) {
+		scan_ready = false;             /* somebody took the registers' clock: never read them again */
+		return false;
+	}
+	*line = rd(disp_intf.base + INTF_LINE_COUNT);
+	*frame = rd(disp_intf.base + INTF_FRAME_COUNT);
+	return true;
 }
 
 /*
@@ -3808,7 +3891,9 @@ redwood_adreno_init(void)
 			} else printf("renoir-display-clocks: upstream clock disabled; not reading DISPCC\n");
 		}
 	}
-	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only && gpu_profile == &adreno_redwood) {
+	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only &&
+	    (gpu_profile == &adreno_redwood || gpu_profile == &adreno_renoir)) {
+		display = gpu_profile == &adreno_renoir ? &display_renoir : &display_redwood;
 		display_probe();
 	}
 	if (!PE_parse_boot_argn("adreno", &last_step, sizeof(last_step))) {

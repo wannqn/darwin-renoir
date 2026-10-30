@@ -203,6 +203,109 @@ recStep(void)
 }
 #define REC_STEP        recStep()
 
+/*
+ * The panel's own refresh (boot-arg fb_scan, on by default; bsd/dev/redwood_adreno.c says where it is
+ * read from). Renoir's panel is a command-mode one: at each of its refreshes the display controller
+ * reads this framebuffer out to it, top to bottom, in about half a refresh, and leaves it alone the
+ * rest. Two things follow from knowing when:
+ *   - the refresh told to the window server (the "vsync" of the user client below) is the panel's,
+ *     not a timer of ours that drifts against it: a frame now and then shown twice and the next not
+ *     at all is what such a drift looks like;
+ *   - every band of rows of a frame is written only between the readout of it before (already
+ *     read, the band may change) and the next (it must be done by then), all bands for the same
+ *     next readout, the frame's target: that readout shows all of the new frame, none of it torn.
+ * The model: a readout began at `start` (the counter said `frame`), they come every `period`, and a
+ * line takes `line_ticks` to read out. It is kept up to date from the counters (scanObserve()).
+ */
+extern "C" bool redwood_display_scan_start(void);
+extern "C" bool redwood_display_scan(uint32_t * frame, uint32_t * line);
+static TUNABLE(uint32_t, gScan, "fb_scan", 1);
+static TUNABLE(uint32_t, gScanLeadUs, "fb_scan_lead", 2000);   /* the first lead from a frame's start to its target */
+
+struct panel_scan {
+	bool            ok;
+	uint32_t        lines;          /* lines a readout */
+	uint64_t        line_ticks;     /* absolute time a line */
+	uint64_t        period;         /* absolute time from one readout to the next */
+	uint64_t        start;          /* when the latest readout seen began */
+	uint32_t        frame;          /* ... and the frame counter during it */
+	uint64_t        ref_start;      /* the first readout seen, for the period */
+	uint32_t        ref_frame;
+};
+static struct panel_scan gPanel;
+#define SCAN_MARGIN_US  250             /* kept between a band's writing and the readout of it */
+
+static inline uint64_t
+usToAbs(uint64_t us)
+{
+	uint64_t t;
+
+	nanoseconds_to_absolutetime(us * NSEC_PER_USEC, &t);
+	return t;
+}
+
+/* Read the counters once; while a readout is going on, it says exactly when it began. */
+static void
+scanObserve(void)
+{
+	uint32_t frame, line;
+	uint64_t now;
+
+	if (!gPanel.ok || !redwood_display_scan(&frame, &line)) {
+		gPanel.ok = false;
+		return;
+	}
+	now = mach_absolute_time();
+	if (line < 8 || line > gPanel.lines) {
+		return;                         /* between two readouts (the counter stands at 1) */
+	}
+	gPanel.start = now - (uint64_t) line * gPanel.line_ticks;
+	gPanel.frame = frame;
+	if (frame - gPanel.ref_frame >= 240) {   /* four seconds and more: the period, to a part in 10^5 */
+		gPanel.period = (gPanel.start - gPanel.ref_start) / (frame - gPanel.ref_frame);
+	}
+}
+
+/* The first readout to begin at `after` or later. */
+static uint64_t
+scanNextStart(uint64_t after)
+{
+	uint64_t start = gPanel.start, period = gPanel.period;
+
+	if (after <= start) {
+		return start;
+	}
+	return start + (after - start + period - 1) / period * period;
+}
+
+/*
+ * Before rows [y0, y1) are written for the readout that begins at `target`: wait until the readout
+ * before it has read them. Says false if it is too late for them to be in time (the readout of
+ * them in `target` begun or about to): written then, the frame is torn there.
+ */
+static bool
+scanWaitRows(int32_t y0, int32_t y1, uint64_t target)
+{
+	uint64_t open, now = mach_absolute_time(), margin = usToAbs(SCAN_MARGIN_US);
+
+	if (target == 0 || y1 <= y0) {
+		return true;
+	}
+	open = target - gPanel.period + (uint64_t) y1 * gPanel.line_ticks + margin;
+	if (now < open && open - now < gPanel.period) {
+		clock_delay_until(open);
+		now = mach_absolute_time();
+	}
+	return now + margin < target + (uint64_t) y0 * gPanel.line_ticks;
+}
+
+/* ... and after: were they written in time? */
+static inline bool
+scanInTime(int32_t y0, uint64_t target)
+{
+	return target == 0 || mach_absolute_time() <= target + (uint64_t) y0 * gPanel.line_ticks;
+}
+
 struct rec_header {
 	char     magic[8];              /* "RWREC003" */
 	uint32_t width, height;
@@ -312,6 +415,7 @@ public:
 	void reportFrameTimes(void);
 	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
 	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
+	void drawShare(const struct RowJob * job, unsigned share, uint32_t * blendRow);
 	static void helperMain(void * self, wait_result_t result);
 	void copyBackBuffer(void);
 	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
@@ -321,6 +425,12 @@ public:
 	uint64_t        fHelperGeneration;
 	unsigned        fHelpersBusy, fHelpersStarted;
 	uint32_t *      fHelperBlend[7];
+	/* the panel's readout this frame is written for (0: no model, write at once), and how far ahead */
+	uint64_t        fScanTarget, fScanLastTarget;
+	uint64_t        fScanLead;
+	volatile uint32_t fScanLate;            /* bands of the frame written too late for their readout */
+	uint32_t        fScanCleanFrames, fStatScanLate, fStatScanFrames;
+	void scanCalibrate(void);
 	void record(MiniIOSurface * s);
 };
 
@@ -456,6 +566,10 @@ IOMobileFramebuffer::start(IOService * provider)
 	fDiffLeft = fDiffTop = ~0u;
 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
 	    fPanelWidth, fPanelHeight, fRowBytes);
+	fScanLead = usToAbs(gScanLeadUs >= 1000 && gScanLeadUs <= 8000 ? gScanLeadUs : 2000);
+	if (gScan) {
+		scanCalibrate();
+	}
 	if (gDoubleBuffer) {
 		vm_size_t backBufferSize = (vm_size_t) fPanelHeight * fRowBytes;
 		IOBufferMemoryDescriptor * memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
@@ -624,6 +738,7 @@ struct RowJob {
 	uint32_t        stride;
 	int32_t         sx, sy, sw, sh, px0, py0, px1, py1, cx0, cx1;
 	bool            filter, unscaled;
+	uint64_t        target;                 /* the panel's readout it is for (scanWaitRows()) */
 };
 
 void
@@ -634,6 +749,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 	int32_t sx = job->sx, sy = job->sy, sw = job->sw, sh = job->sh;
 	int32_t px0 = job->px0, py0 = job->py0, px1 = job->px1, py1 = job->py1, cx0 = job->cx0, cx1 = job->cx1;
 	bool filter = job->filter;
+	bool timely = scanWaitRows(y0 > 0 ? y0 : 0, y1, job->target);
 
 	for (int32_t y = y0; y < y1; y++) {
 		const uint32_t * from;
@@ -701,6 +817,32 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			}
 		}
 	}
+	if (!timely || !scanInTime(y0 > 0 ? y0 : 0, job->target)) {
+		__atomic_fetch_add(&fScanLate, 1, __ATOMIC_RELAXED);
+	}
+}
+
+/*
+ * Share `share` of fThreads of a layer's rows. Written for a readout of the panel (job->target), the
+ * shares are stripes taken in turn, so that all the drawers go down the frame together, top first,
+ * ahead of the readout that comes down after them: the top of the frame is done almost at once and
+ * the frame needs to be begun only a little before its readout. Without, each share is one block.
+ */
+#define SCAN_STRIPE     16
+
+void
+IOMobileFramebuffer::drawShare(const RowJob * job, unsigned share, uint32_t * blendRow)
+{
+	int32_t rows = job->py1 - job->py0;
+
+	if (job->target == 0) {
+		drawRows(job, job->py0 + (int32_t) ((int64_t) rows * share / fThreads),
+		    job->py0 + (int32_t) ((int64_t) rows * (share + 1) / fThreads), blendRow);
+		return;
+	}
+	for (int32_t y = job->py0 + (int32_t) share * SCAN_STRIPE; y < job->py1; y += (int32_t) fThreads * SCAN_STRIPE) {
+		drawRows(job, y, y + SCAN_STRIPE < job->py1 ? y + SCAN_STRIPE : job->py1, blendRow);
+	}
 }
 
 /* A helper of the scaling (fb_threads): waits for rows to do, does them, says so. */
@@ -716,7 +858,6 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 	IOLockUnlock(fb->fHelperLock);
 	for (;;) {
 		const RowJob * job;
-		int32_t rows, y0, y1;
 		uint32_t * blend;
 
 		IOLockLock(fb->fHelperLock);
@@ -730,15 +871,16 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 			int32_t y0 = (int32_t) ((int64_t) fb->fPanelHeight * (index + 1) / fb->fThreads);
 			int32_t y1 = (int32_t) ((int64_t) fb->fPanelHeight * (index + 2) / fb->fThreads);
 			if (y1 > y0 && fb->fBackBuffer != NULL && fb->fBase != NULL) {
+				bool timely = scanWaitRows(y0, y1, job->target);
+
 				memcpy(fb->fBase + (size_t) y0 * fb->fRowBytes, fb->fBackBuffer + (size_t) y0 * fb->fRowBytes, (size_t) (y1 - y0) * fb->fRowBytes);
+				if (!timely || !scanInTime(y0, job->target)) {
+					__atomic_fetch_add(&fb->fScanLate, 1, __ATOMIC_RELAXED);
+				}
 			}
 		} else {
-			/* share index + 1 of fThreads (the presenter takes share 0) */
-			rows = job->py1 - job->py0;
-			y0 = job->py0 + (int32_t) ((int64_t) rows * (index + 1) / fb->fThreads);
-			y1 = job->py0 + (int32_t) ((int64_t) rows * (index + 2) / fb->fThreads);
 			blend = fb->fHelperBlend[index];
-			fb->drawRows(job, y0, y1, blend);
+			fb->drawShare(job, index + 1, blend);
 		}
 		IOLockLock(fb->fHelperLock);
 		fb->fHelpersBusy--;
@@ -748,6 +890,76 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 		IOLockUnlock(fb->fHelperLock);
 	}
 }
+
+/*
+ * The model of the panel's readouts (gPanel), from its counters, watched for up to a tenth of a second:
+ * two lines of one readout give the time a line takes, the beginnings of two readouts the period.
+ * Anything that does not look like a command-mode panel's readout leaves the model off, and this
+ * driver as it was without one.
+ */
+void
+IOMobileFramebuffer::scanCalibrate(void)
+{
+	uint64_t deadline = mach_absolute_time() + usToAbs(100000), at[2] = { 0, 0 }, start = 0, now;
+	uint32_t frame, line, frames[2] = { 0, 0 }, lines[2] = { 0, 0 }, firstFrame = 0;
+	bool counting = false;
+
+	if (!redwood_display_scan_start()) {
+		printf("MiniIOMobileFramebuffer: panel scan: no readout counters on this board: frames written at once\n");
+		return;
+	}
+	gPanel.lines = fPanelHeight;
+	while ((now = mach_absolute_time()) < deadline) {
+		if (!redwood_display_scan(&frame, &line)) {
+			return;
+		}
+		now = mach_absolute_time();
+		if (line >= 100 && line + 100 < fPanelHeight) {
+			if (!counting || frame != frames[0] || line < lines[0]) {
+				at[0] = now, lines[0] = line, frames[0] = frame, counting = true;    /* (a readout of its own) */
+			} else if (line >= lines[0] + 400) {
+				at[1] = now, lines[1] = line, frames[1] = frame;
+				gPanel.line_ticks = (at[1] - at[0]) / (lines[1] - lines[0]);
+				start = at[1] - (uint64_t) lines[1] * gPanel.line_ticks;
+				firstFrame = frame;
+				break;
+			}
+		}
+		IODelay(40);
+	}
+	if (start == 0) {
+		printf("MiniIOMobileFramebuffer: panel scan: no readout seen in 100 ms: frames written at once\n");
+		return;
+	}
+	/* the beginning of a later readout, for the period */
+	while ((now = mach_absolute_time()) < deadline) {
+		if (!redwood_display_scan(&frame, &line)) {
+			return;
+		}
+		now = mach_absolute_time();
+		if (frame != firstFrame && line >= 100 && line + 100 < fPanelHeight) {
+			uint64_t later = now - (uint64_t) line * gPanel.line_ticks, period = (later - start) / (frame - firstFrame);
+			uint64_t ns;
+
+			absolutetime_to_nanoseconds(period, &ns);
+			if (ns < NSEC_PER_SEC / 130 || ns > NSEC_PER_SEC / 45 || gPanel.line_ticks * fPanelHeight >= period * 9 / 10) {
+				printf("MiniIOMobileFramebuffer: panel scan: implausible (%llu us a refresh, %llu us a readout): "
+				    "frames written at once\n", ns / 1000, micros(gPanel.line_ticks * fPanelHeight));
+				return;
+			}
+			gPanel.period = period;
+			gPanel.start = gPanel.ref_start = later;
+			gPanel.frame = gPanel.ref_frame = frame;
+			gPanel.ok = true;
+			printf("MiniIOMobileFramebuffer: panel scan: a refresh every %llu us, read out in %llu us (%llu ns a line): "
+			    "frames go to the panel between its readouts, the window server's refresh is the panel's\n", ns / 1000,
+			    micros(gPanel.line_ticks * fPanelHeight), micros(gPanel.line_ticks * 1000));
+			return;
+		}
+		IODelay(40);
+	}
+	printf("MiniIOMobileFramebuffer: panel scan: no second readout in 100 ms: frames written at once\n");
+}
 void
 IOMobileFramebuffer::copyBackBuffer(void)
 {
@@ -755,12 +967,18 @@ IOMobileFramebuffer::copyBackBuffer(void)
 		return;
 	}
 	if (fThreads <= 1 || fHelpersStarted + 1 < fThreads) {
+		bool timely = scanWaitRows(0, (int32_t) fPanelHeight, fScanTarget);
+
 		memcpy(fBase, fBackBuffer, (size_t) fPanelHeight * fRowBytes);
+		if (!timely || !scanInTime(0, fScanTarget)) {
+			__atomic_fetch_add(&fScanLate, 1, __ATOMIC_RELAXED);
+		}
 		return;
 	}
 	RowJob copyJob;
 	bzero(&copyJob, sizeof(copyJob));
 	copyJob.pixels = NULL;
+	copyJob.target = fScanTarget;
 
 	IOLockLock(fHelperLock);
 	fHelperJob = &copyJob;
@@ -772,7 +990,12 @@ IOMobileFramebuffer::copyBackBuffer(void)
 	/* Thread 0 takes partition 0 */
 	int32_t y0 = 0;
 	int32_t y1 = (int32_t) ((int64_t) fPanelHeight / fThreads);
+	bool timely = scanWaitRows(y0, y1, fScanTarget);
+
 	memcpy(fBase, fBackBuffer, (size_t) (y1 - y0) * fRowBytes);
+	if (!timely || !scanInTime(y0, fScanTarget)) {
+		__atomic_fetch_add(&fScanLate, 1, __ATOMIC_RELAXED);
+	}
 
 	IOLockLock(fHelperLock);
 	while (fHelpersBusy != 0) {
@@ -868,6 +1091,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	job.cx1 = cx1;
 	job.filter = filter;
 	job.unscaled = px1 - px0 == sw && py1 - py0 == sh && px0 >= 0 && (uint32_t) px1 <= fPanelWidth;
+	job.target = fScanTarget;
 	if (fThreads <= 1 || fDiff || fHelpersStarted + 1 < fThreads) {
 		drawRows(&job, py0, py1, fBlendRow);
 		return;
@@ -879,7 +1103,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	fHelperGeneration++;
 	IOLockWakeup(fHelperLock, &fHelperGeneration, false);
 	IOLockUnlock(fHelperLock);
-	drawRows(&job, py0, py0 + (int32_t) ((int64_t) (py1 - py0) / fThreads), fBlendRow);
+	drawShare(&job, 0, fBlendRow);
 	IOLockLock(fHelperLock);
 	while (fHelpersBusy != 0) {
 		IOLockSleep(fHelperLock, &fHelpersBusy, THREAD_UNINT);
@@ -1052,6 +1276,29 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	shown = began;
+	/*
+	 * The panel's readout this frame is for: the first that begins a lead after now. The lead grows
+	 * by half a millisecond after a frame with a stripe written too late for it, and shrinks by a
+	 * tenth of one after 60 frames in a row in time: as little delay as there is room for.
+	 */
+	fScanTarget = 0;
+	fScanLate = 0;
+	if (gPanel.ok && fGraphics) {
+		scanObserve();
+		if (gPanel.ok) {
+			uint64_t target = scanNextStart(began + fScanLead);
+
+			/*
+			 * Never the readout the frame before is for: that one would never be seen, written over
+			 * before its readout. The one after it, then -- its stripes wait for that readout to
+			 * pass, and the window server, its swap held meanwhile, keeps to the panel's pace.
+			 */
+			if (fScanLastTarget != 0 && target < fScanLastTarget + gPanel.period / 2) {
+				target = fScanLastTarget + gPanel.period;
+			}
+			fScanTarget = fScanLastTarget = target;
+		}
+	}
 	IOLockLock(fLock);
 	if (fLastFrame != 0) {
 		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
@@ -1121,6 +1368,20 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	composed = mach_absolute_time();
 	copyBackBuffer();
+	if (fScanTarget != 0) {
+		uint64_t up = usToAbs(500), down = usToAbs(100), floor = usToAbs(1000), ceiling = usToAbs(8000);
+
+		fStatScanFrames++;
+		if (fScanLate != 0) {
+			fStatScanLate++;
+			fScanCleanFrames = 0;
+			fScanLead = fScanLead + up < ceiling ? fScanLead + up : ceiling;
+		} else if (++fScanCleanFrames >= 60) {
+			fScanCleanFrames = 0;
+			fScanLead = fScanLead > floor + down ? fScanLead - down : floor;
+		}
+		scanObserve();
+	}
 	/*
 	 * Only now is the frame in the panel's memory: the swap after it may be handed over. Given back any
 	 * earlier, the window server would draw a frame more ahead of the panel than fb_queue says.
@@ -1136,8 +1397,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fSwapsShown++;
 	if (gTouchLat) {
-		redwood_tl("tl: v %u ready %llu shown %llu done %llu composed %llu\n", swapWord(swap, SWAP_ID), micros(ready),
-		    micros(shown), micros(drawn), micros(composed));
+		redwood_tl("tl: v %u ready %llu shown %llu done %llu composed %llu target %llu late %u lead %llu\n",
+		    swapWord(swap, SWAP_ID), micros(ready), micros(shown), micros(drawn), micros(composed),
+		    fScanTarget != 0 ? micros(fScanTarget) : 0, fScanLate, micros(fScanLead));
 	}
 	if (layers != fLayersShown) {
 		IOLog("MiniIOMobileFramebuffer: swap #%u: surfaces in layers 0x%x now (0x%x before): %u %u %u %u\n", fSwapsShown, layers,
@@ -1324,6 +1586,24 @@ IOMobileFramebufferUserClient::armVSync(void)
 	uint64_t period, now = mach_absolute_time();
 
 	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
+	if (gPanel.ok) {
+		/*
+		 * The panel's own refresh: the next of its readouts to begin, at least half a refresh after
+		 * the one told last (none twice, and none left out for a timer that ran late)
+		 */
+		scanObserve();
+		period = gPanel.period;
+		if (gPanel.ok) {
+			uint64_t next = scanNextStart(now + usToAbs(500));
+
+			if (fVSyncTime != 0 && next < fVSyncTime + period / 2) {
+				next += period;
+			}
+			fVSyncTime = next;
+			thread_call_enter_delayed(fVSyncCall, fVSyncTime);
+			return;
+		}
+	}
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
 	fVSyncTime += period;
 	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {

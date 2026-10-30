@@ -41,14 +41,16 @@ def parse(path):
                 elif w[:2] == ['tl:', 'g'] and len(w) >= 8 and w[3] == 'began':
                     draws.append((int(w[4]), int(w[6])))
                 elif w[:2] == ['tl:', 'v'] and len(w) >= 9:
-                    shown.append((int(w[2]), int(w[4]), int(w[6]), int(w[8])))
+                    # (fb_scan: the frame is on the panel at the readout it was written for, "target")
+                    target = int(w[w.index('target') + 1]) if 'target' in w else 0
+                    shown.append((int(w[2]), int(w[4]), int(w[6]), int(w[8]), target or int(w[8])))
                 elif w[:2] == ['tl:', 's'] and len(w) >= 5:
                     swaps[int(w[2])] = int(w[4])
                 elif w[:3] == ['tl:', 'p', '1'] and len(w) >= 8:
                     downs.append(int(w[7]))
             except (ValueError, IndexError):
                 pass                    # (a line two writers interleaved)
-    shown.sort(key=lambda v: v[3])
+    shown.sort(key=lambda v: v[4])
     draws.sort()
     downs.sort()
     return turns, draws, shown, downs, swaps
@@ -59,7 +61,7 @@ def analyze(path, window_us):
     began = [d[0] for d in draws]
     steps, charged, gaps = [], collections.Counter(), collections.Counter()
     for i in range(1, len(shown)):
-        t0, t1 = shown[i - 1][3], shown[i][3]
+        t0, t1 = shown[i - 1][4], shown[i][4]
         gap = t1 - t0
         k = bisect.bisect_right(downs, t0) - 1
         if gap > 300000 or k < 0 or t0 - downs[k] > window_us:
@@ -67,7 +69,7 @@ def analyze(path, window_us):
         steps.append(gap)
         if gap <= 25000:
             continue
-        swap_id, ready, start, done = shown[i]
+        swap_id, ready, start, done, _ = shown[i]
         handed = swaps.get(swap_id, t1)
         j = bisect.bisect_right(began, handed) - 1
         draw_began, draw_ended = draws[j] if j >= 0 else (t1, t1)

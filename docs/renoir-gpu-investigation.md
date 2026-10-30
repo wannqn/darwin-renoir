@@ -139,5 +139,36 @@ Remaining misses are mostly outside this driver:
 - The rest is the window server's own CPU drawing through Mesa and GPU time on heavy transition
   frames.
 
-Not done: hardware page flipping or TE-synchronized presentation (no verified TE source on Renoir),
-and 90/120 Hz (the panel runs at 60 Hz).
+## Presentation synchronized to the panel (2026-10-30)
+
+`display_probe=1` now also runs on Renoir with Renoir's own addresses (shima device tree: dispcc
+GDSC `0xaf03000`, MDSS AHB `0xaf02080`, DSI interface intf1 `0xae6b800`; Redwood's intf is at
+`0xae36000`). The earlier crash is consistent with reading the display block without its register
+clock or at Redwood's addresses. The probe makes the same two clock-enable writes as on Redwood
+and nothing else. Result on the phone: intf1's timing engine is off and its frame counter advances
+60.0 times a second. **The panel is in command mode**: at each panel refresh the controller reads
+the framebuffer out in about 8.6 ms (line counter 1 to 2400, about 278 lines/ms) and stands at
+line 1 in between.
+
+The framebuffer driver uses these counters by default (`fb_scan=1`; `fb_scan=0` restores the
+unsynchronized behaviour, and boards without the counters fall back automatically):
+
+- The window server's vsync notifications are the panel's readout starts, phase-locked to the
+  counter, not a free-running 60 Hz timer that drifts against the panel.
+- Each frame is written for one readout (`target`), strictly after the previous frame's. All
+  drawing threads go down the frame together in interleaved 16-row stripes. A stripe waits until
+  the previous readout has read it and must be done before its readout reaches it, so the readout
+  shows the whole new frame. The lead before the target adapts: +0.5 ms after a frame with a late
+  stripe, -0.1 ms after 60 clean frames.
+
+Phone run (same scripted gestures, `touch_lat=1 touchscreen=0`): 1933 of 1933 frames were
+synchronized and only 8 (0.4%) had a stripe written late, the only frames that can tear. The lead
+settled at a median of 3.5 ms. From the presenter starting a frame to the panel reading it took a
+median of 14 ms: one refresh from vsync to display. Refreshes missed during gestures were 19.6%,
+within the 16.8–19.7% range of the unsynchronized runs. A frame that misses its readout now waits
+for the next one instead of appearing torn mid-readout. `tools/smoothness.py` uses the readout
+(`target`) as the display time when it is logged.
+
+Not done: hardware page flipping and 90/120 Hz (the panel is driven at 60 Hz). The remaining
+missed refreshes are SpringBoard's main thread, the window server's CPU drawing and GPU time, as
+described above.
