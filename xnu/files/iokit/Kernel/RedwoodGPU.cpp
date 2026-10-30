@@ -170,7 +170,7 @@ struct redwood_show {
 #define GPU_SUBMIT_BOS          8192
 #define GPU_PATIENCE_MS         5000            /* for a buffer or a submission that somebody waits for without a limit */
 #define GPU_ASK_AGAIN_US        200             /* while waiting for the core: how long between two looks at how far it is */
-#define GPU_PUSH_AGAIN_MS       4               /* a surface is pushed out of the cache again for a submission this long after the last */
+#define GPU_PUSH_AGAIN_MS       16              /* a surface is pushed out of the cache again at most once per frame */
 
 static IOLock * gGPULock;                       /* around everything that is the GPU's (redwood_gpu_...) */
 static bool gGPUReported;
@@ -911,7 +911,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
 		if (b->surface != NULL) {
 			uint32_t seed = b->surface->shared()->seed;
 
-			if (seed == b->seed && !b->seen && began - b->pushed < again) {
+			if (seed == b->seed && began - b->pushed < again) {
 				continue;
 			}
 			b->seed = seed;

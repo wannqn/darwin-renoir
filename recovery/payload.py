@@ -15,7 +15,7 @@ def validate_mac(value):
     return value
 
 
-def prepare(data, epoch, wifi_mac=None, kernel=None):
+def prepare(data, epoch, wifi_mac=None, kernel=None, cpu_count=None):
     if len(data) < 8:
         raise ValueError('Truncated XNUP header')
     magic, size = struct.unpack_from('<II', data)
@@ -46,12 +46,12 @@ def prepare(data, epoch, wifi_mac=None, kernel=None):
         offset = end
         if key == b'cmdline':
             words = body.rstrip(b'\0').decode().split()
-            words = ['cpus=8' if w.startswith('cpus=') else w for w in words]
-            for opt in ('touch_lat=1', 'fb_filter=0'):
-                if opt not in words:
-                    words.append(opt)
             replaced = ('epoch=',) if wifi_mac is None else ('epoch=', 'wifi_mac=')
+            if cpu_count is not None:
+                replaced += ('cpus=',)
             words = [word for word in words if not word.startswith(replaced)]
+            if cpu_count is not None:
+                words.append('cpus=' + str(cpu_count))
             words.append('epoch=' + str(int(epoch)))
             if wifi_mac is not None:
                 words.append('wifi_mac=' + wifi_mac)

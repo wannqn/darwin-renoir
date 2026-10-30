@@ -3808,6 +3808,65 @@ my_glDeleteProgram(void *context, GLuint name)
 #undef EAGL_GEN_TABLE
 
 _Static_assert(EAGL_TABLE_SIZE <= SLOTS * 8, "the table has grown");
+static void
+eagl_prewarm_programs(struct eagl *e)
+{
+	if (e->plain == 0) {
+		e->plain = plain_program(plain_fragment, "as they are");
+		if (e->plain != 0) {
+			e->plain_matrix = glGetUniformLocation(e->plain, "vertex_matrix");
+			e->plain_textured = glGetUniformLocation(e->plain, "textured");
+		}
+	}
+	if (e->lookup == 0) {
+		e->lookup = plain_program(table_fragment, "through a table");
+		if (e->lookup != 0) {
+			e->lookup_matrix = glGetUniformLocation(e->lookup, "vertex_matrix");
+			glUseProgram(e->lookup);
+			glUniform1i(glGetUniformLocation(e->lookup, "table"), 1);
+		}
+	}
+	if (e->masking == 0) {
+		e->masking = plain_program(masking_fragment, "a colour matrix over premultiplied pixels");
+		if (e->masking != 0) {
+			e->masking_matrix = glGetUniformLocation(e->masking, "vertex_matrix");
+			e->masking_colours = glGetUniformLocation(e->masking, "colours");
+		}
+	}
+	if (e->vibrant == 0 && fetch_offered) {
+		GLint good = 0;
+		e->vibrant = plain_program(vibrant_fragment, "a colour matrix over what is behind");
+		if (e->vibrant != 0) {
+			glGetProgramiv(e->vibrant, GL_LINK_STATUS, &good);
+			e->no_vibrant = !good;
+			e->vibrant_matrix = glGetUniformLocation(e->vibrant, "vertex_matrix");
+			e->vibrant_colours = glGetUniformLocation(e->vibrant, "colours");
+		}
+	}
+	if (e->blur4 == 0) {
+		e->blur4 = plain_program(blur4_fragment, "four samples around a point");
+		if (e->blur4 != 0) {
+			e->blur4_matrix = glGetUniformLocation(e->blur4, "vertex_matrix");
+			e->blur4_places = glGetUniformLocation(e->blur4, "places");
+		}
+	}
+	if (e->box == 0) {
+		e->box = plain_program(box_fragment, "eight times smaller, sixteen samples");
+		if (e->box != 0) {
+			e->box_matrix = glGetUniformLocation(e->box, "vertex_matrix");
+			e->box_places = glGetUniformLocation(e->box, "places");
+		}
+	}
+	if (vblur_on && e->halve == 0) {
+		e->halve = vblur_program(vblur_vertex, halve_fragment, "halving");
+		if (e->halve != 0) {
+			glUseProgram(e->halve);
+			glUniform1i(glGetUniformLocation(e->halve, "source"), 0);
+			e->halve_texel = glGetUniformLocation(e->halve, "texel");
+		}
+	}
+	glUseProgram(0);
+}
 
 /* ---- EAGLContext ---------------------------------------------------------------------------------- */
 
@@ -3839,6 +3898,7 @@ my_initWithAPI(id self, SEL selector, unsigned long api, id properties)
 	say("redwood-gl: an OpenGL ES %lu context for CoreAnimation, by %s: %s; %s; shaders %s\n", api, redwood_gl_library(),
 	    (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER),
 	    (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION));
+	eagl_prewarm_programs(e);
 	return self;
 }
 

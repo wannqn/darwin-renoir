@@ -47,7 +47,8 @@ try:
  mac=options.wifi_mac
  kernel_path=options.kernel or R/'prebuilt/mach.development.bcm2837'
  kernel=None if options.last_phone_good else kernel_path.read_bytes()
- data=prepare((R/payload).read_bytes(),time.time(),wifi_mac=mac,kernel=kernel)
+ data=prepare((R/payload).read_bytes(),time.time(),wifi_mac=mac,kernel=kernel,
+              cpu_count=None if options.last_phone_good else 8)
 except (OSError,ValueError) as error:raise SystemExit(str(error))
 dev=devices()
 if len(dev)!=1:raise SystemExit('Connect exactly one phone in fastboot mode')

@@ -76,7 +76,7 @@ enum {
 
 #define kFBNotifyVSync          5
 #define kFBNotifyTypes          8
-#define kFBRefreshHz            90                      /* 90 Hz default for Renoir AMOLED; overridable via fb_hz */
+#define kFBRefreshHz            60                      /* matches the 60 Hz hardware scanout left by DisplayDxe; overridable via fb_hz */
 
 #define FRAME_TIMES             64                      /* milliseconds told apart between two frames */
 #define FRAME_PAUSE             90                      /* from so many on, nothing was moving: not a slow frame */
@@ -159,9 +159,9 @@ static TUNABLE(uint32_t, gDoubleBuffer, "fb_double", 1);
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
  * to 10 (the phone, 15 October; fb_threads=1 is how it was).
  */
-static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
+static TUNABLE(uint32_t, gThreads, "fb_threads", 4);
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
-static TUNABLE(uint32_t, gQueue, "fb_queue", 1);
+static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
 static inline unsigned
 swapQueue(void)
 {
@@ -306,6 +306,7 @@ public:
 	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
 	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
 	static void helperMain(void * self, wait_result_t result);
+	void copyBackBuffer(void);
 	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
 	unsigned        fThreads;
 	IOLock *        fHelperLock;
@@ -718,12 +719,20 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 		done = fb->fHelperGeneration;
 		job = fb->fHelperJob;
 		IOLockUnlock(fb->fHelperLock);
-		/* share index + 1 of fThreads (the presenter takes share 0) */
-		rows = job->py1 - job->py0;
-		y0 = job->py0 + (int32_t) ((int64_t) rows * (index + 1) / fb->fThreads);
-		y1 = job->py0 + (int32_t) ((int64_t) rows * (index + 2) / fb->fThreads);
-		blend = fb->fHelperBlend[index];
-		fb->drawRows(job, y0, y1, blend);
+		if (job->pixels == NULL) {
+			int32_t y0 = (int32_t) ((int64_t) fb->fPanelHeight * (index + 1) / fb->fThreads);
+			int32_t y1 = (int32_t) ((int64_t) fb->fPanelHeight * (index + 2) / fb->fThreads);
+			if (y1 > y0 && fb->fBackBuffer != NULL && fb->fBase != NULL) {
+				memcpy(fb->fBase + (size_t) y0 * fb->fRowBytes, fb->fBackBuffer + (size_t) y0 * fb->fRowBytes, (size_t) (y1 - y0) * fb->fRowBytes);
+			}
+		} else {
+			/* share index + 1 of fThreads (the presenter takes share 0) */
+			rows = job->py1 - job->py0;
+			y0 = job->py0 + (int32_t) ((int64_t) rows * (index + 1) / fb->fThreads);
+			y1 = job->py0 + (int32_t) ((int64_t) rows * (index + 2) / fb->fThreads);
+			blend = fb->fHelperBlend[index];
+			fb->drawRows(job, y0, y1, blend);
+		}
 		IOLockLock(fb->fHelperLock);
 		fb->fHelpersBusy--;
 		if (fb->fHelpersBusy == 0) {
@@ -732,6 +741,39 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 		IOLockUnlock(fb->fHelperLock);
 	}
 }
+void
+IOMobileFramebuffer::copyBackBuffer(void)
+{
+	if (fBackBuffer == NULL || !fGraphics) {
+		return;
+	}
+	if (fThreads <= 1 || fHelpersStarted + 1 < fThreads) {
+		memcpy(fBase, fBackBuffer, (size_t) fPanelHeight * fRowBytes);
+		return;
+	}
+	RowJob copyJob;
+	bzero(&copyJob, sizeof(copyJob));
+	copyJob.pixels = NULL;
+
+	IOLockLock(fHelperLock);
+	fHelperJob = &copyJob;
+	fHelpersBusy = fThreads - 1;
+	fHelperGeneration++;
+	IOLockWakeup(fHelperLock, &fHelperGeneration, false);
+	IOLockUnlock(fHelperLock);
+
+	/* Thread 0 takes partition 0 */
+	int32_t y0 = 0;
+	int32_t y1 = (int32_t) ((int64_t) fPanelHeight / fThreads);
+	memcpy(fBase, fBackBuffer, (size_t) (y1 - y0) * fRowBytes);
+
+	IOLockLock(fHelperLock);
+	while (fHelpersBusy != 0) {
+		IOLockSleep(fHelperLock, &fHelpersBusy, THREAD_UNINT);
+	}
+	IOLockUnlock(fHelperLock);
+}
+
 
 /*
  * Put a rectangle of a 32-bit surface on the screen. `dst` is in display coordinates; the
@@ -1062,9 +1104,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 		}
 	}
-	if (fBackBuffer != NULL && fGraphics) {
-		memcpy(fBase, fBackBuffer, (size_t) fPanelHeight * fRowBytes);
-	}
+	copyBackBuffer();
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {
 		record(recorded);

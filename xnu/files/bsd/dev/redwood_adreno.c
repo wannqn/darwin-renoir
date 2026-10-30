@@ -1217,11 +1217,22 @@ settle(void)
 }
 
 /* Push what this processor has written to a stretch of memory out of its cache, and forget it: the GPU block reads memory. */
+/* Push what this processor has written to memory out of its cache so the GPU sees it. */
 static void
 to_memory(vm_offset_t start, vm_size_t size)
 {
 	for (vm_offset_t line = start & ~(vm_offset_t)63; line < start + size; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
+		__asm__ volatile ("dc cvac, %0" : : "r" (line));
+	}
+	settle();
+}
+
+/* Invalidate cache so this processor reads fresh memory written by the GPU. */
+static void
+from_memory(vm_offset_t start, vm_size_t size)
+{
+	for (vm_offset_t line = start & ~(vm_offset_t)63; line < start + size; line += 64) {
+		__asm__ volatile ("dc ivac, %0" : : "r" (line));
 	}
 	settle();
 }
@@ -3432,10 +3443,9 @@ redwood_gpu_done(uint32_t fence)
 {
 	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
 
-	to_memory((vm_offset_t)word, 4);
+	from_memory((vm_offset_t)word, 4);
 	return (int32_t)(*word - fence) >= 0;
 }
-
 uint32_t
 redwood_gpu_last(void)
 {
@@ -3459,7 +3469,7 @@ gpu_times(void)
 	volatile uint64_t *times = (volatile uint64_t *)(core_scratch.memory + GPU_TIMES_AT);
 	uint32_t done;
 
-	to_memory(core_scratch.memory, 4096);
+	from_memory(core_scratch.memory, 4096);
 	done = *(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
 	if (done - gpu_timed > GPU_TIMES) {
 		gpu_timed = done - GPU_TIMES;           /* (the older ones have been written over) */

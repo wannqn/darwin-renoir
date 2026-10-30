@@ -32,9 +32,10 @@ address can be entered **with or without colons** (`AABBCCDDEEFF` or
 invalid address is rejected and prompted again; cancelling or closing input
 stops before USB access. To skip the prompt, pass `--wifi-mac AA:BB:CC:DD:EE:FF`.
 This is the canonical boot command. It uses the current tested kernel in
-`prebuilt/mach.development.bcm2837`. A freshly rebuilt kernel can be selected
-with `--kernel PATH`. Add `--last-phone-good` instead to explicitly select the
-earlier archived kernel/root, which predates these Wi-Fi fixes.
+`prebuilt/mach.development.bcm2837` and starts eight cores (`cpus=8`: the boot
+CPU plus seven secondary cores). A freshly rebuilt kernel can be
+selected with `--kernel PATH`. Add `--last-phone-good` instead to explicitly
+select the earlier archived kernel/root and its original boot arguments.
 
 The helper validates the model and uses only `fastboot boot`, RAM uploads and
 `oem run`. It refuses to overwrite a running resident loader. Windows fastboot.exe
@@ -145,5 +146,6 @@ Run `xnu/apply.sh` only when the extracted XNU source directory does not already
 exist. Obtain the address while Android Wi-Fi is enabled, from the device Wi-Fi
 MAC in Settings or `adb shell cat /sys/class/net/wlan0/address` (some Android
 builds require root for that read). Use the device/interface address, rather
-than a router-specific randomized address. The helper replaces only the kernel,
-requested MAC and timestamp in a temporary payload; archived assets stay intact.
+than a router-specific randomized address. The helper replaces the kernel,
+requested MAC, timestamp and (except for `--last-phone-good`) CPU count in a
+temporary payload; archived assets stay intact.

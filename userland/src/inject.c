@@ -641,9 +641,9 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFInd
  * leaves an application, the swipe back in a navigation stack, the pull down from the top) take
  * no touch that is not so marked, whatever its path. All we have is where the finger landed.
  */
-#define EDGE_SIDE       (16.0 / 375)
-#define EDGE_TOP        (16.0 / 812)
-#define EDGE_BOTTOM     (34.0 / 812)    /* the strip below the applications' content, where the home bar is */
+#define EDGE_SIDE       (24.0 / 375)
+#define EDGE_TOP        (20.0 / 812)
+#define EDGE_BOTTOM     (70.0 / 812)    /* broadened home bar strip (~207 px on 2400h) for immediate home gesture */
 
 static struct {
 	bool touching, edge;
@@ -829,7 +829,8 @@ send_touch(IOHIDServiceClientRef screen, const struct redwood_touch *t)
 		any |= fingers[i].touching;
 	}
 
-	hand = IOHIDEventCreateDigitizerEvent(NULL, t->time, DIGITIZER_HAND, 0, 0, change & ~DIGITIZER_RANGE, 0, fingers[f].x,
+	hand = IOHIDEventCreateDigitizerEvent(NULL, t->time, DIGITIZER_HAND, 0, 0,
+	    (change & ~DIGITIZER_RANGE) | (fingers[f].edge ? DIGITIZER_FROM_EDGE_TIP : 0), 0, fingers[f].x,
 	    fingers[f].y, 0, 0, 0, 0, any, any, 0);
 	IOHIDEventSetIntegerValue(hand, FIELD_DIGITIZER_DISPLAY_INTEGRATED, 1);
 	IOHIDEventSetIntegerValue(hand, FIELD_IS_BUILT_IN, 1);
@@ -910,6 +911,9 @@ input_thread(__unused void *arg)
 	int device;
 
 	pthread_setname_np("redwood input");
+	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+	struct sched_param sp = { .sched_priority = 47 };
+	pthread_setschedparam(pthread_self(), SCHED_RR, &sp);
 	{
 		char arguments[1024] = "";
 		size_t size = sizeof(arguments) - 1;
@@ -932,7 +936,8 @@ input_thread(__unused void *arg)
 			say("redwood: input: no HID client of type %d\n", types[i]);
 			continue;
 		}
-		IOHIDEventSystemClientScheduleWithDispatchQueue(client, dispatch_queue_create("redwood.input", NULL));
+		dispatch_queue_attr_t qos_attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+		IOHIDEventSystemClientScheduleWithDispatchQueue(client, dispatch_queue_create("redwood.input", qos_attr));
 		screen = make_service(client, "Redwood touch screen", HID_PAGE_DIGITIZER, HID_USAGE_TOUCH_SCREEN, true);
 		if (screen == NULL) {
 			say("redwood: input: a HID client of type %d may not create services\n", types[i]);

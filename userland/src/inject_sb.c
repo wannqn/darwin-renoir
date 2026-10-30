@@ -201,15 +201,9 @@ set_setup_required_reason(id self, SEL selector, long reason)
 #define SNAPSHOT_FORMAT_JPEG            3
 
 static long
-snapshot_output_format(__unused id self, __unused SEL selector, id snapshot)
+snapshot_output_format(__unused id self, __unused SEL selector, __unused id snapshot)
 {
-	SEL opaque = sel_registerName("isImageOpaque");
-
-	if (snapshot != NULL && class_getInstanceMethod(object_getClass(snapshot), opaque) != NULL &&
-	    ((BOOL (*)(id, SEL))objc_msgSend)(snapshot, opaque)) {
-		return SNAPSHOT_FORMAT_JPEG;
-	}
-	return SNAPSHOT_FORMAT_PNG;
+	return SNAPSHOT_FORMAT_JPEG;
 }
 
 /* ---- battery state from redwood's Qualcomm charger stack ----------------------------------------- */
