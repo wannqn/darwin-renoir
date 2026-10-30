@@ -139,6 +139,25 @@ Before deleting local work, verify both branches and all seven assets plus
 SHA256SUMS. Keep access to your GitHub account. Old logs/RAW captures, Apple IPSW
 source inputs and build caches are not archived.
 
+## Sileo and a root shell over Wi-Fi
+
+`tools/mk-jb.sh` fetches the rootless Procursus bootstrap with Sileo, ElleKit and OpenSSH into
+`jb/` (not in the repository). `userland/build.sh` then puts it into `system.apfs` as `/jb` (from
+`system.packfs` with `convert-packfs.py --add/--link`), and `init` grafts it onto `/var/jb` in RAM
+at every boot. The normal job list (`userland/rc.jobs.renoir`) runs the bootstrap's `prep.sh` and
+starts the prefix's `sshd`: root by key only, no passwords.
+
+Keys stay on this computer: `ssh/authorized_keys` (the public half of your client key) and
+`ssh/ssh_host_ed25519_key` (`ssh/` is ignored by git). A build without `SHARE=1` puts them on the
+data volume; never pass such an image on. After joining Wi-Fi in Settings:
+
+```sh
+ssh -i ~/.ssh/renoir_ed25519 root@<the phone's address>
+```
+
+Everything under `/var` is in RAM: packages installed with Sileo or apt and the Wi-Fi password
+are gone after the next boot.
+
 ## Historical packfs Wi-Fi startup correction
 
 The source now allows Renoir Wi-Fi to start without `fw/network`, which is

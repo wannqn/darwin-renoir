@@ -385,3 +385,49 @@ psci_smp_stop_here(void)
 }
 
 #endif /* defined(GENERIC_PSCI_SMP) */
+
+/*
+ * The slower cores (ml_parse_cpu_topology(): an L2 access penalty, the loader's "small-core"; none with
+ * boot-arg small_cores=0), for kernel work that streams through memory and should leave the faster
+ * ones to the user interface (iokit/Kernel/MiniIOMobileFramebuffer.cpp): how many the topology has,
+ * and the calling thread bound to the n-th of them that is up, which it then runs on. -1 when there
+ * is no such core, and the thread is left as it was.
+ */
+#include <kern/processor.h>
+#include <kern/sched_prim.h>
+
+unsigned
+redwood_slow_cores(void)
+{
+	const ml_topology_info_t *topology = ml_get_topology_info();
+	unsigned count = 0;
+
+	for (unsigned i = 0; i < topology->num_cpus; i++) {
+		count += topology->cpus[i].l2_access_penalty != 0;
+	}
+	return count;
+}
+
+int
+redwood_bind_slow_core(unsigned n)
+{
+	const ml_topology_info_t *topology = ml_get_topology_info();
+	unsigned seen = 0;
+
+	for (unsigned i = 0; i < topology->num_cpus; i++) {
+		int cpu = (int)topology->cpus[i].cpu_id;
+		processor_t processor;
+
+		if (topology->cpus[i].l2_access_penalty == 0 || seen++ != n) {
+			continue;
+		}
+		processor = cpu >= 0 && cpu < MAX_SCHED_CPUS ? processor_array[cpu] : PROCESSOR_NULL;
+		if (processor == PROCESSOR_NULL || processor->state < PROCESSOR_IDLE) {
+			return -1;
+		}
+		thread_bind(processor);
+		thread_block(THREAD_CONTINUE_NULL);     /* (onto it) */
+		return cpu;
+	}
+	return -1;
+}

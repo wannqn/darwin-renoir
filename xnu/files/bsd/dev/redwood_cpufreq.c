@@ -435,6 +435,10 @@ static vm_offset_t ddr_rsc;
 static uint32_t ddr_mc0, ddr_sh0, ddr_acv;
 static bool ddr_voted;
 
+/* (bsd/dev/redwood_input.c: command slot set 0 is the touch driver's and Wi-Fi's too, on renoir) */
+extern void redwood_rpmh_lock(void);
+extern void redwood_rpmh_unlock(void);
+
 static uint32_t
 cmd_db_address(const char *name)
 {
@@ -529,7 +533,9 @@ ddr_raise(void)
 		return;
 	}
 	ddr_rsc = ml_io_map(RSC_PHYS, RSC_SIZE);
+	redwood_rpmh_lock();
 	ddr_voted = ddr_vote(vote);
+	redwood_rpmh_unlock();
 	tell("ddr: memory bandwidth vote %u on MC0 (%#x) and SH0 (%#x)%s\n", vote, ddr_mc0, ddr_sh0, ddr_voted ? "" : ": FAILED");
 }
 
@@ -563,8 +569,13 @@ redwood_cpufreq_init(void)
 	load_start();
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));
-	if (!redwood_board_is("redwood")) {
-		if (enabled != 0) tell("ddr: Redwood RPMh vote is not enabled on this board\n");
+	/*
+	 * renoir (SM7350) has the command database, the application processor's RPMh sequencer ("DRV 2",
+	 * its first slot set an active one) and the BCMs MC0, SH0 and ACV where redwood has them
+	 * (renoir.dts: cmd-db at 0x80860000, apps_rsc drv-2 at 0x18220000, tcs-offset 0xd00).
+	 */
+	if (!redwood_board_is("redwood") && !redwood_board_is("renoir")) {
+		if (enabled != 0) tell("ddr: no RPMh vote on this board\n");
 	} else if (enabled == 1) {
 		ddr_look();
 		ddr_slots();

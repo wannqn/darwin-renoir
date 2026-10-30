@@ -557,13 +557,27 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 fi
 
 # The preserved recovery image is the source when original Apple extraction inputs are absent.
-# Its old stage0 cannot mount APFS: always replace it with the just-built program.
+# Its old stage0 cannot mount APFS: always replace it with the just-built program. The package
+# manager's prefix (tools/mk-jb.sh) goes in as in the branch above: /jb, its applications in
+# /Applications, and the prefix's programs where Sileo looks for them in /bin.
 if [ ! -f $IOS/system.manifest ] || [ ! -f $CACHE/dyld_shared_cache_arm64 ]; then
 	[ -f system.packfs ] || { echo "build.sh: system source missing: restore userland/system.packfs first" >&2; exit 1; }
+	JB_ARGS=()
+	if [ -d ../jb/root/var/jb ]; then
+		JB_ARGS+=(--add jb=../jb/root/var/jb)
+		for app in ../jb/root/var/jb/Applications/*.app; do
+			[ -d "$app" ] && JB_ARGS+=(--add "Applications/${app##*/}=$app")
+		done
+		for c in $SILEO_BIN; do
+			JB_ARGS+=(--link "bin/$c=/var/jb/usr/bin/$c")
+		done
+	fi
 	if [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ system.packfs -nt system.apfs ] ||
-	   [ ../tools/apfs/mkapfs.py -nt system.apfs ] || [ ../tools/apfs/convert-packfs.py -nt system.apfs ] || [ -n "$SYSTEM" ]; then
+	   [ ../tools/apfs/mkapfs.py -nt system.apfs ] || [ ../tools/apfs/convert-packfs.py -nt system.apfs ] ||
+	   { [ -d ../jb/root/var/jb ] && [ ../jb/root/var/jb -nt system.apfs ]; } || [ -n "$SYSTEM" ]; then
 		python3 ../tools/apfs/convert-packfs.py system.packfs system.apfs.new --volume System \
-			--replace sbin/launchd=obj/stage0 ${CHECK:+--check}
+			--replace sbin/launchd=obj/stage0 "${JB_ARGS[@]}" ${CHECK:+--check}
 		mv -f system.apfs.new system.apfs
+		[ ${#JB_ARGS[@]} -eq 0 ] || echo "  the package manager's prefix: $(du -sh ../jb/root/var/jb | cut -f1) as /jb (init puts it at /var/jb)"
 	fi
 fi

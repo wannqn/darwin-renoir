@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/resource.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
@@ -100,6 +101,8 @@ speed(void *arg)
 	return NULL;
 }
 
+static void memory_speeds(void);
+
 static void
 clock_speeds(int threads)
 {
@@ -115,6 +118,79 @@ clock_speeds(int threads)
 		printf(" cpu%zu %llu MHz", result[i].cpu, result[i].microseconds ? 100000000ULL / result[i].microseconds : 0);
 	}
 	printf("\n");
+	memory_speeds();
+}
+
+/*
+ * How long a load takes that waits for the one before (a chain through a buffer in a random order,
+ * one pointer per 64-byte line), for buffers that fit the caches and for one that does not; and how
+ * fast memcpy() goes through 64 MB. With the caches working, a Cortex-A78 takes some 1-2 ns in its
+ * L1, 3-5 in its L2, 10-20 in the L3 and 100-150 from memory: much more in the small sizes means
+ * the memory is not cached as it should be.
+ */
+static void
+memory_speeds(void)
+{
+	static const size_t sizes[] = { 16 << 10, 256 << 10, 2 << 20, 64 << 20 };
+	static mach_timebase_info_data_t timebase;
+	size_t most = 64 << 20;
+	uint8_t *buffer = malloc(most), *copy = malloc(most);
+
+	if (buffer == NULL || copy == NULL) {
+		return;
+	}
+	mach_timebase_info(&timebase);
+	memset(buffer, 1, most);
+	memset(copy, 2, most);
+	printf("cpu_test: memory: a dependent load in");
+	for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+		size_t lines = sizes[s] / 64, steps = 20000000;
+		uint32_t *order = malloc(lines * sizeof(*order));
+		uint64_t t0, t1;
+		void **p;
+
+		if (order == NULL) {
+			break;
+		}
+		for (size_t i = 0; i < lines; i++) {
+			order[i] = (uint32_t)i;
+		}
+		for (size_t i = lines - 1; i > 0; i--) {          /* one random cycle through every line */
+			size_t j = (size_t)arc4random_uniform((uint32_t)i);
+			uint32_t keep = order[i];
+
+			order[i] = order[j];
+			order[j] = keep;
+		}
+		for (size_t i = 0; i < lines; i++) {
+			*(void **)(buffer + (size_t)order[i] * 64) = buffer + (size_t)order[(i + 1) % lines] * 64;
+		}
+		free(order);
+		p = (void **)(buffer + 0);
+		for (size_t i = 0; i < lines; i++) {
+			p = *p;                                 /* (once round first: in the caches, as far as they go) */
+		}
+		t0 = mach_absolute_time();
+		for (size_t i = 0; i < steps; i++) {
+			p = *p;
+		}
+		t1 = mach_absolute_time();
+		__asm__ volatile ("" : : "r" (p));
+		printf(" %zu KB %.1f ns", sizes[s] >> 10, (double)(t1 - t0) * timebase.numer / timebase.denom / steps);
+	}
+	{
+		uint64_t t0 = mach_absolute_time(), t1;
+
+		for (int round = 0; round < 4; round++) {
+			memcpy(copy, buffer, most);
+			__asm__ volatile ("" : : "r" (copy) : "memory");        /* (the copy is never read: kept all the same) */
+		}
+		t1 = mach_absolute_time();
+		printf("; memcpy %.2f GB/s", 4.0 * most / ((double)(t1 - t0) * timebase.numer / timebase.denom));
+	}
+	printf("\n");
+	free(buffer);
+	free(copy);
 }
 
 int

@@ -167,6 +167,34 @@ static TUNABLE(uint32_t, gDoubleBuffer, "fb_double", 0);
  * to 10 (the phone, 15 October; fb_threads=1 is how it was).
  */
 static TUNABLE(uint32_t, gThreads, "fb_threads", 4);
+/*
+ * Boot-arg fb_small=0: the drawers anywhere, as before. By default, on a phone with slower cores
+ * (renoir: three Cortex-A55 beside four A78), the presenter and its helpers are bound to those, one
+ * each, and there are no more of them than there are such cores. Kernel threads run above every
+ * thread of the user interface: drawing a frame on four of the fast cores at once took them from
+ * SpringBoard, the window server and the application for 5 to 9 ms of every frame, and during a
+ * launch interrupted by the home gesture all seven cores were busy (the phone, 30 October). The
+ * scaling streams through memory and keeps up on the small cores.
+ */
+static TUNABLE(uint32_t, gSmallCores, "fb_small", 1);
+extern "C" unsigned redwood_slow_cores(void);           /* osfmk/arm64/psci_smp.c */
+extern "C" int redwood_bind_slow_core(unsigned n);
+
+static void
+bindDrawer(unsigned index, const char * who)
+{
+	int cpu;
+
+	if (!gSmallCores || redwood_slow_cores() < 2) {
+		return;
+	}
+	cpu = redwood_bind_slow_core(index);
+	if (cpu >= 0) {
+		IOLog("MiniIOMobileFramebuffer: %s on cpu %d, a slower core\n", who, cpu);
+	} else {
+		IOLog("MiniIOMobileFramebuffer: %s anywhere: no slower core up for it\n", who);
+	}
+}
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
 static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
 static inline unsigned
@@ -529,6 +557,9 @@ IOMobileFramebuffer::start(IOService * provider)
 	thread_set_thread_name(thread, "frames to the panel");
 	thread_deallocate(thread);
 	fThreads = gThreads >= 1 && gThreads <= 8 ? gThreads : 1;
+	if (gSmallCores && redwood_slow_cores() >= 2 && fThreads > redwood_slow_cores()) {
+		fThreads = redwood_slow_cores();
+	}
 	fHelperLock = IOLockAlloc();
 	for (unsigned i = 0; i + 1 < fThreads; i++) {
 		if (kernel_thread_start(&IOMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {
@@ -852,6 +883,7 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 	IOMobileFramebuffer * fb = (IOMobileFramebuffer *) self;
 	unsigned index;
 	uint64_t done = 0;
+	bool bound = false;
 
 	IOLockLock(fb->fHelperLock);
 	index = fb->fHelpersStarted++;
@@ -867,6 +899,10 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 		done = fb->fHelperGeneration;
 		job = fb->fHelperJob;
 		IOLockUnlock(fb->fHelperLock);
+		if (!bound) {
+			bound = true;           /* (at the first frame: every core is up by then) */
+			bindDrawer(index + 1, "a helper");
+		}
 		if (job->pixels == NULL) {
 			int32_t y0 = (int32_t) ((int64_t) fb->fPanelHeight * (index + 1) / fb->fThreads);
 			int32_t y1 = (int32_t) ((int64_t) fb->fPanelHeight * (index + 2) / fb->fThreads);
@@ -1200,6 +1236,7 @@ IOMobileFramebuffer::presenter(void)
 {
 	static uint8_t swap[SWAP_SIZE];         /* (one thread) */
 	MiniIOSurface * surfaces[SWAP_LAYERS];
+	bool bound = false;
 
 	for (;;) {
 		IOLockLock(fSwapLock);
@@ -1209,6 +1246,10 @@ IOMobileFramebuffer::presenter(void)
 		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
 		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
 		IOLockUnlock(fSwapLock);
+		if (!bound) {
+			bound = true;           /* (at the first frame: every core is up by then) */
+			bindDrawer(0, "the presenter");
+		}
 		show(swap, surfaces);
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 			if (surfaces[layer] != NULL) {

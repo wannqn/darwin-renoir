@@ -73,6 +73,27 @@ class ConversionTests(unittest.TestCase):
             finally:
                 container.close()
 
+    def test_added_tree_keeps_set_id_bits_root_owned_and_link_replaces_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            source, output, prefix = work / 'source.packfs', work / 'root.apfs', work / 'prefix'
+            source.write_bytes(legacy_image()[0])
+            (prefix / 'bin').mkdir(parents=True)
+            helper = prefix / 'bin' / 'helper'
+            helper.write_bytes(b'#!/bin/sh\n')
+            helper.chmod(0o4755)
+            subprocess.run([sys.executable, str(HERE / 'convert-packfs.py'), str(source), str(output),
+                            '--volume', 'redwood', '--add', 'jb=' + str(prefix), '--link', 'file=/jb/bin/helper'],
+                           check=True, capture_output=True)
+            container = apfs.Container(str(output))
+            try:
+                volume = apfs.pick_volume(container, None)
+                inode = volume.inode(volume.lookup('/jb/bin/helper')[0])
+                self.assertEqual((inode.owner, inode.group, inode.mode), (0, 0, stat.S_IFREG | 0o4755))
+                self.assertEqual(stat.S_IFMT(volume.inode(volume.lookup('/file')[0]).mode), stat.S_IFLNK)
+            finally:
+                container.close()
+
     def test_xnup_ramdisk_extraction(self):
         image, _ = legacy_image()
         body = struct.pack('<16sII', b'ramdisk', len(image), 0) + image + b'\0' * 24

@@ -175,6 +175,11 @@ def main():
     parser.add_argument('--ramdisk', action='store_true', help='read the ramdisk entry of an archived XNUP')
     parser.add_argument('--tree', type=Path, help='new directory to retain extracted root/ and manifest')
     parser.add_argument('--replace', action='append', default=[], metavar='PATH=FILE')
+    parser.add_argument('--add', action='append', default=[], metavar='PATH=SOURCE',
+                        help='a host directory (copied with its links and permission bits) or file put at PATH, '
+                             'in place of whatever is there; owned by root:wheel')
+    parser.add_argument('--link', action='append', default=[], metavar='PATH=TARGET',
+                        help='a symbolic link at PATH to TARGET, in place of a file or link there')
     parser.add_argument('--check', action='store_true', help='independently check output using apfsck and kernel reader')
     args = parser.parse_args()
     if args.extract_only and args.tree is None:
@@ -203,6 +208,22 @@ def main():
             if any(p.is_symlink() for p in target.parents if p != tree.parent):
                 raise ValueError('Replacement traverses a symlink: ' + name)
             shutil.copyfile(filename, target)
+        for addition in args.add + args.link:
+            name, source = addition.split('=', 1)
+            target = tree / str(safe_path(name))
+            if any(p.is_symlink() for p in target.parents if p != tree.parent):
+                raise ValueError('Addition traverses a symlink: ' + name)
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if addition in args.link:
+                target.symlink_to(source)
+            elif Path(source).is_dir():
+                shutil.copytree(source, target, symlinks=True)
+            else:
+                shutil.copy2(source, target)
         if args.extract_only:
             print(str(work) + ': packfs extracted; source preserved')
             return

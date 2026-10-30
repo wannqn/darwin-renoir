@@ -1,4 +1,10 @@
 # Normal Renoir boot: no automatic tone, keyboard-click or melody tests.
+# The package manager's prefix, when the system image has one (tools/mk-jb.sh): the per-boot preparation
+# of the bootstrap (Sileo registered, dpkg's "firmware"), and a shell over Wi-Fi -- OpenSSH of the
+# prefix, root by key only, the key from ssh/ (build.sh, not with SHARE=1). Without either, the line
+# fails and nothing else changes.
+/var/jb/bin/sh /var/jb/prep.sh
+/var/jb/usr/sbin/sshd -D -e -h /var/root/.ssh/ssh_host_ed25519_key -o UsePAM=no -o PasswordAuthentication=no -o PermitRootLogin=prohibit-password -o AuthorizedKeysFile=/var/root/.ssh/authorized_keys &
 /bin/ps -A
 /redwood/bin/net_test waitaddr en0 150 fetch https://example.com/ resolve example.com
 /redwood/bin/battery_test 1

@@ -172,3 +172,45 @@ for the next one instead of appearing torn mid-readout. `tools/smoothness.py` us
 Not done: hardware page flipping and 90/120 Hz (the panel is driven at 60 Hz). The remaining
 missed refreshes are SpringBoard's main thread, the window server's CPU drawing and GPU time, as
 described above.
+
+## Interrupted launches (2026-10-30)
+
+`userland/rc.jobs.rapid-switch`: six rounds of Settings tapped, the home gesture 150 ms later
+(before it has opened), Wallet tapped 100 ms after that, the home gesture again 150 ms later
+(`touch_lat=1 touchscreen=0`, `tools/smoothness.py --window 2.0`). The lag is the home gesture:
+the first commit of SpringBoard after it.
+
+| Kernel | home after Settings (ms) | home after Wallet (ms) | refreshes missed |
+| --- | --- | --- | --- |
+| before (`kernel-scan3`) | 21-432 (half about 400) | 553-631 | 24.7% |
+| memory bandwidth vote | 10-178 (one in six over 40) | 424-573 | 16.6% |
+| and the drawers on the small cores | 18-188 (two in six over 40) | 314-524 | 16.7% |
+
+What was found, in order:
+
+- During such a run all seven cores were 60-90% busy. Per process over 18 s: the kernel 22 s of
+  processor time, backboardd 16 s, SpringBoard 14 s, the applications 4-5 s. In SpringBoard, the
+  main thread (3.7 s in the long turns) and `com.apple.UIKit.inProcessAnimationManager`; in
+  backboardd, `com.apple.coreanimation.display.primary`.
+- Renoir had no vote for memory bandwidth (`ddr: Redwood RPMh vote is not enabled on this board`):
+  the memory ran at what the boot loader's firmware had voted. Renoir's command database, RPMh
+  sequencer and BCMs are where redwood's are (renoir.dts), so the vote of `redwood_cpufreq.c` is
+  now made on renoir too, under the command slot lock it shares with the touch driver and Wi-Fi.
+  All cores together, writing: 14.4 GB/s before, 24.1 GB/s with it; a dependent load from 64 MB
+  177 ns, now 153 ns.
+- The kernel's scaling of every frame (the window server's 1125x2436 onto the 1080x2400 panel) ran
+  on four of the fast cores at once, above every thread of the interface, for 5-9 ms a frame.
+  It now runs on the three Cortex-A55 (`fb_small=1`, the default; `fb_small=0`: as before), one
+  thread each: 11-14 ms a frame there, 5 of 2157 frames with a stripe late.
+- What is left is SpringBoard's main thread itself: 490-550 ms of processor time for the turn that
+  handles the second tap while the first transition is still running, 86% of that turn on a
+  processor. Its call tree (the sampler, `sb_sample=1`, now names whole functions and their
+  callers): the icon launch and workspace transaction (`SBMainWorkspace
+  _executeTransitionRequest:`, about 40%), the switcher's layout and animations, the scene updates
+  of the interrupted transition, and Core Animation's commit. No single function: about 10% of the
+  samples are `objc_msgSend`, the rest spread thin. Ruled out by measurement: the processor itself
+  (the same C benchmark per clock as under Android on the same cores), the caches (a dependent
+  load in 6 MB: 15 ns), the nano allocator (on for SpringBoard; malloc+free 33 ns), 16 KB pages,
+  os_log to the console (242 lines of backboardd in a run). A SpringBoard main thread at fixed
+  priority 61 (tried before the two changes): the home gesture after Wallet 458 ms instead of 553
+  (medians), refreshes missed 26.6% instead of 24.7%; taken out.

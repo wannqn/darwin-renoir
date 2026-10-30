@@ -1,0 +1,12 @@
+# Commands run by the launchd job com.redwood.demo (see com.redwood.demo.plist).
+# Interrupted launches (boot-arg touch_lat=1; tools/smoothness.py, tools/frames.py): unlock, 60 s for
+# start-up work to settle, then six rounds of: Settings tapped, 150 ms later the home gesture before it has
+# opened, 100 ms later Wallet tapped, 150 ms later the home gesture again; two seconds between rounds.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 60
+/redwood/bin/cpu_test 1
+/redwood/bin/rwtouch tap 0.845 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 0.1 tap 0.62 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 2
+/redwood/bin/rwtouch tap 0.845 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 0.1 tap 0.62 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 2
+/redwood/bin/rwtouch tap 0.845 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 0.1 tap 0.62 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 2
+/redwood/bin/rwtouch tap 0.845 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 0.1 tap 0.62 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 2
+/redwood/bin/rwtouch tap 0.845 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 0.1 tap 0.62 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 2
+/redwood/bin/rwtouch tap 0.845 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 0.1 tap 0.62 0.71 wait 0.15 swipe 0.5 0.995 0.5 0.55 150 wait 2

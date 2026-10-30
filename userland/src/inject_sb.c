@@ -95,13 +95,15 @@ now_us(void)
  * Boot-arg sb_sample=1 (with touch_lat=1): where SpringBoard's main thread spends a long turn of its
  * run loop. A thread of ours stops it every millisecond for a moment and writes down its program
  * counter and the return addresses on its stack (frame pointers); a turn of 50 ms or more is then said
- * as its most frequent places, leaf first and then anywhere on the stack:
- *   tl: A WOKE DONE SAMPLES leaf|stack COUNT IMAGE SYMBOL+OFFSET UNSLID
- * (SYMBOL is dladdr()'s, the nearest exported one before the address; UNSLID is the address the
- * shared cache was built for, for a symbolizer that knows the private ones too.)
+ * as its most frequent leaves, and the functions on the stack in a fiftieth of its samples or more:
+ *   tl: A WOKE DONE SAMPLES leaf|function COUNT IMAGE SYMBOL+OFFSET UNSLID
+ * (SYMBOL is dladdr()'s, or the Objective-C method whose code it is: for a leaf the nearest one
+ * before it, for a function only one that begins where the function does, else "fn"; UNSLID is the
+ * address the shared cache was built for, for a symbolizer that knows the private ones too.) A turn
+ * of TREE_TURN_US or more has its call edges too (say_long_turn()).
  */
-#define SAMPLE_DEPTH    24
-#define SAMPLE_RING     4096
+#define SAMPLE_DEPTH    128
+#define SAMPLE_RING     2048
 #define SAMPLE_TURN_US  50000
 struct main_sample {
 	uint64_t at;
@@ -279,9 +281,29 @@ method_at(uintptr_t address, const char *image)
 	       methods[low - 1].name : NULL;
 }
 
+/* The method that begins at a function's first instruction, if one does (no nearest guess: a block or a C function is none). */
+static const char *
+method_starting(uintptr_t start, const char *image)
+{
+	const char *name = method_at(start, image);
+	size_t low = 0, high = method_count;
+
+	while (low < high) {
+		size_t mid = (low + high) / 2;
+
+		if (methods[mid].imp < start) {
+			low = mid + 1;
+		} else {
+			high = mid;
+		}
+	}
+	return name != NULL && low < method_count && methods[low].imp == start ? methods[low].name : NULL;
+}
+
 static void
 say_places(uint64_t woke, uint64_t done, unsigned samples, const char *what, struct place_count *places, unsigned used)
 {
+	bool exact = strcmp(what, "function") == 0;    /* places that are where functions begin */
 	size_t length = 0;
 	uintptr_t cache = (uintptr_t)_dyld_get_shared_cache_range(&length);
 
@@ -289,7 +311,7 @@ say_places(uint64_t woke, uint64_t done, unsigned samples, const char *what, str
 		make_method_table();
 	}
 	qsort(places, used, sizeof(*places), by_count);
-	for (unsigned i = 0; i < used && i < 16; i++) {
+	for (unsigned i = 0; i < used && (exact || i < 60); i++) {
 		Dl_info info;
 		const char *image = "?", *symbol = "?", *method;
 		uintptr_t offset = 0, address = (uintptr_t)places[i].key;
@@ -300,7 +322,10 @@ say_places(uint64_t woke, uint64_t done, unsigned samples, const char *what, str
 			symbol = info.dli_sname != NULL ? info.dli_sname : "?";
 			offset = info.dli_saddr != NULL ? address - (uintptr_t)info.dli_saddr : 0;
 		}
-		if (strcmp(symbol, "<redacted>") == 0 && (method = method_at(address, image)) != NULL) {
+		if (exact && strcmp(symbol, "<redacted>") == 0) {
+			method = method_starting(address, image);
+			symbol = method != NULL ? method : "fn";
+		} else if (strcmp(symbol, "<redacted>") == 0 && (method = method_at(address, image)) != NULL) {
 			symbol = method;
 			offset = 0;
 		}
@@ -310,15 +335,119 @@ say_places(uint64_t woke, uint64_t done, unsigned samples, const char *what, str
 	}
 }
 
+/*
+ * Places on the stack are counted by the function they are in, once a sample however often the
+ * function is on it: a function's count is the share of the turn spent in it and in what it called.
+ * The function of an address is where dladdr() says its symbol begins -- the shared cache keeps a
+ * "<redacted>" one at the start of every private function too -- found once an address (a table),
+ * and only the functions said are named (say_places()'s way).
+ */
+#define PC_SLOTS        32768
+#define FUNCTION_SLOTS  8192
+static struct { uintptr_t pc, start; } *pc_slots;
+static struct function_count { uintptr_t start; uint32_t count, last_sample; } *functions;
+
+static uintptr_t
+function_start(uintptr_t pc)
+{
+	unsigned slot = (unsigned)((pc >> 2) * 2654435761u) % PC_SLOTS;
+	Dl_info info;
+
+	for (unsigned probe = 0; probe < PC_SLOTS; probe++, slot = (slot + 1) % PC_SLOTS) {
+		if (pc_slots[slot].pc == pc) {
+			return pc_slots[slot].start;
+		}
+		if (pc_slots[slot].pc == 0) {
+			break;
+		}
+	}
+	uintptr_t start = dladdr((const void *)pc, &info) != 0 && info.dli_saddr != NULL ? (uintptr_t)info.dli_saddr : pc;
+
+	if (pc_slots[slot].pc == 0) {
+		pc_slots[slot].pc = pc;
+		pc_slots[slot].start = start;
+	}
+	return start;
+}
+
+static struct function_count *
+function_count_of(uintptr_t start)
+{
+	unsigned slot = (unsigned)((start >> 2) * 2654435761u) % FUNCTION_SLOTS;
+
+	for (unsigned probe = 0; probe < FUNCTION_SLOTS; probe++, slot = (slot + 1) % FUNCTION_SLOTS) {
+		if (functions[slot].start == start || functions[slot].start == 0) {
+			functions[slot].start = start;
+			return &functions[slot];
+		}
+	}
+	return NULL;
+}
+
+/*
+ * And for turns of TREE_TURN_US or more, which function called which, as the samples have it:
+ * tl: A WOKE DONE SAMPLES edge COUNT CALLER CALLEE (the two by where they begin in the cache, as
+ * the function lines say them), once a sample, for the calls in as many as a fiftieth of them.
+ */
+#define TREE_TURN_US    300000
+#define EDGE_SLOTS      16384
+static struct edge_count { uintptr_t caller, callee; uint32_t count, last_sample; } *edges;
+
+static int
+by_function_count(const void *a, const void *b)
+{
+	return (int)((const struct function_count *)b)->count - (int)((const struct function_count *)a)->count;
+}
+
+static int
+by_edge_count(const void *a, const void *b)
+{
+	return (int)((const struct edge_count *)b)->count - (int)((const struct edge_count *)a)->count;
+}
+
+static void
+count_edge(uintptr_t caller, uintptr_t callee, unsigned sample)
+{
+	unsigned slot = (unsigned)(((caller >> 2) * 2654435761u) ^ ((callee >> 2) * 40503u)) % EDGE_SLOTS;
+
+	for (unsigned probe = 0; probe < EDGE_SLOTS; probe++, slot = (slot + 1) % EDGE_SLOTS) {
+		struct edge_count *e = &edges[slot];
+
+		if (e->count == 0 || (e->caller == caller && e->callee == callee)) {
+			e->caller = caller;
+			e->callee = callee;
+			if (e->last_sample != sample) {
+				e->last_sample = sample;
+				e->count++;
+			}
+			return;
+		}
+	}
+}
+
 static void
 say_long_turn(uint64_t woke, uint64_t done)
 {
-	static struct place_count leaves[256], stacks[1024];
-	unsigned used_leaves = 0, used_stacks = 0, samples = 0;
+	static struct place_count leaves[256], named[200];
+	unsigned used_leaves = 0, samples = 0, used_named = 0;
 	uint64_t last = main_sample_count;
+	bool tree = done - woke >= TREE_TURN_US;
+	size_t length = 0;
+	uintptr_t cache = (uintptr_t)_dyld_get_shared_cache_range(&length);
 
+	if (functions == NULL) {
+		functions = calloc(FUNCTION_SLOTS, sizeof(*functions));
+		pc_slots = calloc(PC_SLOTS, sizeof(*pc_slots));
+		edges = calloc(EDGE_SLOTS, sizeof(*edges));
+		if (functions == NULL || pc_slots == NULL || edges == NULL) {
+			return;
+		}
+	}
+	bzero(functions, FUNCTION_SLOTS * sizeof(*functions));
+	bzero(edges, EDGE_SLOTS * sizeof(*edges));
 	for (uint64_t n = last > SAMPLE_RING ? last - SAMPLE_RING : 0; n < last; n++) {
 		const struct main_sample *s = &main_samples[n % SAMPLE_RING];
+		uintptr_t callee = 0;
 
 		if (s->at < woke || s->at > done) {
 			continue;
@@ -326,19 +455,35 @@ say_long_turn(uint64_t woke, uint64_t done)
 		samples++;
 		count_place(leaves, &used_leaves, 256, s->pc[0]);
 		for (uint32_t d = 0; d < s->depth; d++) {
-			bool again = false;
+			uintptr_t start = function_start((uintptr_t)s->pc[d]);
+			struct function_count *f = function_count_of(start);
 
-			for (uint32_t e = 0; e < d && !again; e++) {
-				again = s->pc[e] == s->pc[d];   /* (recursion: a place once a sample) */
+			if (f != NULL && f->last_sample != samples) {
+				f->last_sample = samples;
+				f->count++;
 			}
-			if (!again) {
-				count_place(stacks, &used_stacks, 1024, s->pc[d]);
+			if (tree && callee != 0 && callee != start) {
+				count_edge(start, callee, samples);
 			}
+			callee = start;
 		}
 	}
-	if (samples != 0) {
-		say_places(woke, done, samples, "leaf", leaves, used_leaves);
-		say_places(woke, done, samples, "stack", stacks, used_stacks);
+	if (samples == 0) {
+		return;
+	}
+	say_places(woke, done, samples, "leaf", leaves, used_leaves);
+	qsort(functions, FUNCTION_SLOTS, sizeof(*functions), by_function_count);       /* (the table is rebuilt every turn) */
+	for (unsigned i = 0; i < FUNCTION_SLOTS && used_named < (tree ? 200 : 60) && functions[i].count * 50 >= samples; i++) {
+		named[used_named++] = (struct place_count){ functions[i].start, functions[i].count };
+	}
+	say_places(woke, done, samples, "function", named, used_named);
+	if (!tree) {
+		return;
+	}
+	qsort(edges, EDGE_SLOTS, sizeof(*edges), by_edge_count);
+	for (unsigned i = 0; i < EDGE_SLOTS && i < 300 && edges[i].count * 50 >= samples; i++) {
+		say("tl: A %llu %llu %u edge %u %#lx %#lx\n", woke, done, samples, edges[i].count,
+		    (unsigned long)(edges[i].caller - cache + CACHE_BASE), (unsigned long)(edges[i].callee - cache + CACHE_BASE));
 	}
 }
 
