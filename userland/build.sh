@@ -2,9 +2,9 @@
 # Build the user-space side of the bring-up.
 #
 #   hello            one raw-syscall program; as a RAM disk on its own it boots through mockfs
-#   root.packfs      the small image: our init and test programs, etc/rc, and the launchd jobs
-#                    (LaunchDaemons/). It travels in the payload next to the kernel (first RAM
-#                    disk, /dev/md0) and is mounted on /redwood. Rebuilt every time.
+#   root.apfs      the small image: our init and test programs, etc/rc, and the launchd jobs
+#                    (LaunchDaemons/). It travels in the payload next to the kernel (second RAM
+#                    disk, /dev/md1) and is mounted on /redwood. Rebuilt every time.
 #                      RC=<file>    etc/rc: rc.launchd (default) hands process 1 to the iOS launchd
 #                                   after init's checks; rc.ios runs a few iOS programs and halts
 #                      JOBS="..."   labels of the stock iOS launchd jobs to load (default: IOS_JOBS)
@@ -39,9 +39,9 @@
 #                                   trailing ">> FILE" and "&". So a program that needs a value passed to
 #                                   it needs an option for it, not an environment variable -- which is why
 #                                   air_run grew --buffer.
-#                      GL=1         with an OpenGL ES implementation for the window server: Mesa
-#                                   (tools/mk-mesa.sh fetches and builds it) behind src/eagl.c, as
-#                                   lib/libOSMesa.8.dylib (15 MB) and lib/libredwood-gl.dylib. Where the
+#                      GL=1         with an OpenGL ES implementation for the window server: Mesa26.2.5
+#                                   (tools/mk-mesa.sh reconstructs the verified consolidated source)
+#                                   behind src/eagl.c, as lib/libOSMesa.8.dylib and lib/libredwood-gl.dylib. Where the
 #                                   kernel has started the phone's GPU, CoreAnimation then draws with its
 #                                   OpenGL ES renderer, by that GPU (boot-arg gpu=1); anywhere else -- QEMU,
 #                                   no boot-arg, no firmware in ../fw-gpu -- the library is not even loaded
@@ -52,17 +52,17 @@
 #                                   kernel's adsp_step=N, bsd/dev/redwood_adsp.c, which runs before the root is
 #                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
 #                                   the kernel. adsp=1 needs none of it: the system image has the firmware in /fw.
-#   system.packfs    the system image, the root filesystem (second RAM disk, /dev/md1): the part of
+#   system.apfs    the system image, the root filesystem (resident RAM disk, /dev/md0): the part of
 #                    iOS 16.5 chosen by ../ios165/select-system.py at its real paths, the dyld
 #                    shared cache, and src/stage0.c as /sbin/launchd (the real one is
 #                    /sbin/launchd.ios). 3 GB; upload once per loader session with
-#                    `xl ramdisk userland/system.packfs`. Rebuilt when missing, when its inputs
+#                    `xl ramdisk userland/system.apfs`. Rebuilt when missing, when its inputs
 #                    (stage0, the manifest, the cryptex files) are newer, or with SYSTEM=1 (after
 #                    changing the recipe below).
 #
 #   PREBUILT=1       do not compile anything: take our programs from ../prebuilt/userland (this is also
 #                    what happens when the cross toolchain is not set up, see ../xnu-deps/setup.sh);
-#                    the images are then made of them and of the iOS files alone (python3 + liblz4)
+#                    the images are then made of them and of the iOS files alone (Python 3 + zlib)
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
@@ -140,9 +140,15 @@ mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
 if [ -n "$PREBUILT" ]; then
+	# Old prebuilt PID1 mounts packfs; never silently wrap it in an APFS image.
+	APFS_SOURCES=$(sha256sum src/init.c src/stage0.c libmini/mini.c libmini/mini.h libmini/start.S)
+	[ "$(cat ../prebuilt/userland/apfs-built-from 2>/dev/null)" = "$APFS_SOURCES" ] || {
+		echo "build.sh: prebuilt PID1/stage0 are not from the current APFS sources; build with the cross toolchain, then tools/update-prebuilt.sh" >&2
+		exit 1
+	}
 	echo "build.sh: not compiling, using the programs in prebuilt/userland"
 	for f in ../prebuilt/userland/*; do
-		# keep a file that did not change (and its time stamp): system.packfs depends on stage0
+		# keep a file that did not change (and its time stamp): system.apfs depends on stage0
 		cmp -s "$f" "obj/$(basename "$f")" || cp "$f" obj/
 	done
 	cp obj/hello hello
@@ -152,13 +158,30 @@ else
 	$CC -c libmini/start.S -o obj/start.o
 	for prog in init child stage0; do
 		$CC -Ilibmini $LD -o obj/$prog.new src/$prog.c obj/mini.o obj/start.o
-		# keep the old file (and its time stamp) when nothing changed: system.packfs depends on stage0
+		# keep the old file (and its time stamp) when nothing changed: system.apfs depends on stage0
 		cmp -s obj/$prog.new obj/$prog && rm obj/$prog.new || mv obj/$prog.new obj/$prog
 	done
 fi
 
 # --- the small image ------------------------------------------------------------------------------
-rm -rf root
+ROOT_MANIFEST=
+ARCHIVED_ROOT=
+if [ ! -d "$IOS/rootfs/usr/lib" ]; then
+	# The recovery archive is a genuine source image, not a replacement for missing iOS files.
+	# Keep its selected iOS jobs and data; rebuild our programs and overlays below.
+	SOURCE_PAYLOAD=../recovery/assets/renoir-ios-share.bin
+	[ -f "$SOURCE_PAYLOAD" ] || { echo "build.sh: missing extracted iOS inputs and $SOURCE_PAYLOAD; run recovery/restore.py" >&2; exit 1; }
+	rm -rf obj/apfs-root-source
+	python3 ../tools/apfs/convert-packfs.py "$SOURCE_PAYLOAD" --ramdisk --volume redwood \
+		--extract-only --tree obj/apfs-root-source
+	rm -rf root
+	cp -a obj/apfs-root-source/root root
+	ROOT_MANIFEST=,manifest=obj/apfs-root-source/manifest
+	ARCHIVED_ROOT=1
+	echo "build.sh: using preserved SHARE recovery root and selected iOS jobs; original archive unchanged"
+else
+	rm -rf root
+fi
 mkdir -p root/sbin root/bin root/etc root/share root/LaunchDaemons
 cp obj/init root/sbin/init
 cp obj/child root/bin/child
@@ -174,7 +197,7 @@ for d in $EXTRA_SHARE; do
 	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
 	cp -rL "$d" root/share/
 done
-if [ -d $IOS/rootfs/usr/lib ]; then
+if [ -d $IOS/rootfs/usr/lib ] || [ -n "$ARCHIVED_ROOT" ]; then
 	if [ -z "$PREBUILT" ]; then
 		# ordinary dynamically linked programs of our own, built against the iOS SDK
 		$DYN -o obj/hello_dyn src/hello_dyn.c
@@ -250,9 +273,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -bundle -framework CoreFoundation -o obj/RedwoodAudio src/audio_plugin.c
 		if [ -n "$GL" ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
-			# (Mesa says beside the library what it was built from: one from other patches is built again)
+			# Mesa26 owns its recipe/source/driver fingerprint; never hash the historical Mesa25 stack.
 			M=../xnu-deps/build/mesa/out
-			[ "$(cat $M/built-from 2>/dev/null)" = "$(cat ../tools/mesa/*.patch ../tools/mesa/redwood-drm/* | sha256sum)" ] ||
+			[ "$(cat $M/built-from 2>/dev/null)" = "$(../tools/mk-mesa.sh --fingerprint)" ] ||
 				../tools/mk-mesa.sh
 			./mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h
 			$DYN -dynamiclib -install_name /redwood/lib/libredwood-gl.dylib -Iobj -framework CoreFoundation \
@@ -322,14 +345,15 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		*) echo "$library $names" ;;
 		esac
 	done > root/etc/inject.conf
-	cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
+	[ ! -f $IOS/var.skel ] || cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
 	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
 	# points back into /var); point them at the data that ships with the system, and use this machine's zone
 	zone=${TZ:-$(timedatectl show -p Timezone --value 2>/dev/null || true)}; zone=${zone:-UTC}
 	sed -i -e 's|^l\t/usr/share/zoneinfo\t/private/var/db/timezone/zoneinfo$|l\t/usr/share/zoneinfo.default\t/private/var/db/timezone/zoneinfo|' \
 		-e "s|^l\t/var/db/timezone/zoneinfo/[^\t]*\t/private/var/db/timezone/localtime\$|l\t/var/db/timezone/zoneinfo/$zone\t/private/var/db/timezone/localtime|" root/etc/var.skel
 	# ... and the files of ours it puts there (var/): those under mobile/ belong to the user mobile
-	cp -r var root/var
+	mkdir -p root/var
+	cp -a var/. root/var/
 	(cd var && find . -type f | sed 's|^\./||' | sort) | while read -r f; do
 		case $f in mobile/*) owner=501 ;; *) owner=0 ;; esac
 		printf 'f\t644\t%s\t%s\t/private/var/%s\t/var/%s\n' $owner $owner "$f" "$f"
@@ -359,6 +383,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			printf 'f\t600\t0\t0\t/private/var/root/.ssh/%s\t/var/root/.ssh/%s\n' $k $k >> root/etc/var.skel
 		done
 	fi
+	# Archived roots already contain these generated entries. Merge by destination:
+	# current rows override archived rows; parents still precede their children.
+	python3 ./merge-var-skel.py root/etc/var.skel
 	cp ${RC:-rc.launchd} root/etc/rc
 	cp ${RC_JOBS:-rc.jobs.renoir} root/etc/rc.jobs
 	# QUIET=1: launchd's own standard error goes nowhere (src/init.c). It says a few thousand
@@ -368,7 +395,12 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -n "$QUIET" ] && : > root/etc/quiet
 	# Jobs must name programs present in the RAM system image or extracted cryptexes.
 	cp com.redwood.demo.plist com.redwood.wifi.plist root/LaunchDaemons/
-	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $IOS/rootfs root/LaunchDaemons $IOS_JOBS
+	if [ -z "$ARCHIVED_ROOT" ]; then
+		[ -z "$IOS_JOBS" ] || OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $IOS/rootfs root/LaunchDaemons $IOS_JOBS
+	elif [ -n "${JOBS+x}${REST:-}${OSLOG+x}" ]; then
+		echo "build.sh: JOBS/REST/OSLOG changes need extracted ios165/rootfs job inputs, not the archived selection" >&2
+		exit 1
+	fi
 fi
 # firmware of the phone's own hardware, where somebody has pulled it from the phone's Android into ../fw-gpu
 # (it is the vendor's and never in the repository). Per-board directories keep
@@ -444,12 +476,15 @@ if [ -n "$secrets" ]; then
 	echo "build.sh: this image carries:$secrets"
 	echo "build.sh: do not pass it on as it is; SHARE=1 builds the same image without them."
 fi
-../mkpackfs.py -o root.packfs root
+python3 ../tools/apfs/mkapfs.py -z --plain fw --plain fw-renoir --plain fw-wifi-renoir --plain fw-audio-renoir -o root.apfs.new redwood=root$ROOT_MANIFEST
+[ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs.new redwood=root$ROOT_MANIFEST
+mv -f root.apfs.new root.apfs
 
 # --- the system image -----------------------------------------------------------------------------
 if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
-	{ [ ! -f system.packfs ] || [ obj/stage0 -nt system.packfs ] || [ $IOS/system.manifest -nt system.packfs ] ||
-	  [ $IOS/cryptex -nt system.packfs ] || [ -n "$SYSTEM" ]; }; then
+	{ [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ ../tools/apfs/mkapfs.py -nt system.apfs ] ||
+	  [ $IOS/system.manifest -nt system.apfs ] ||
+	  [ $IOS/cryptex -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
 	# what ios165/select-system.py has chosen since ios165/rootfs was extracted is not in it, and would not be
 	# in the image either (so it was once with the audio plug-ins and the system's sounds: iOS found no
 	# speaker and played nothing, though our device was there and the kernel's side worked)
@@ -513,12 +548,22 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/
 	done
-	# thousands of small files: 4K blocks for them, the kernel's 16K pages for everything bigger
-	# compressed (read in place by packfs): half the size with LZ4, which is what fits into the phone's RAM;
-	# ZSTD=1 compresses with Zstandard instead (a quarter smaller again, slower to build and to read),
-	# PLAIN=1 builds the image uncompressed
-	if [ -n "$PLAIN" ]; then pack="-b 4096 -a 16384"; elif [ -n "$ZSTD" ]; then pack="--zstd"; else pack="-z"; fi
-	../mkpackfs.py $pack -m $IOS/system.manifest -o system.packfs.new sysroot
-	mv -f system.packfs.new system.packfs
+	# Genuine APFS with decmpfs zlib compression; firmware remains directly addressable.
+	python3 ../tools/apfs/mkapfs.py -z --plain fw --plain fw-renoir --plain fw-wifi-renoir --plain fw-audio-renoir \
+		-o system.apfs.new System=sysroot,manifest=$IOS/system.manifest
+	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs.new System=sysroot,manifest=$IOS/system.manifest
+	mv -f system.apfs.new system.apfs
 	rm -rf sysroot
+fi
+
+# The preserved recovery image is the source when original Apple extraction inputs are absent.
+# Its old stage0 cannot mount APFS: always replace it with the just-built program.
+if [ ! -f $IOS/system.manifest ] || [ ! -f $CACHE/dyld_shared_cache_arm64 ]; then
+	[ -f system.packfs ] || { echo "build.sh: system source missing: restore userland/system.packfs first" >&2; exit 1; }
+	if [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ system.packfs -nt system.apfs ] ||
+	   [ ../tools/apfs/mkapfs.py -nt system.apfs ] || [ ../tools/apfs/convert-packfs.py -nt system.apfs ] || [ -n "$SYSTEM" ]; then
+		python3 ../tools/apfs/convert-packfs.py system.packfs system.apfs.new --volume System \
+			--replace sbin/launchd=obj/stage0 ${CHECK:+--check}
+		mv -f system.apfs.new system.apfs
+	fi
 fi

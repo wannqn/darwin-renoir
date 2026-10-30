@@ -2,8 +2,8 @@
 
 Наши правки XNU `xnu-8796.121.2` (ядро iOS 16.5, Darwin 22.5.0):
 
-- `renoir.patch` — изменения в файлах Apple (60 файлов);
-- `files/` — новые файлы по их путям в дереве XNU (37 файлов);
+- `renoir.patch` — изменения в файлах Apple;
+- `files/` — новые файлы по их путям в дереве XNU;
 - `apply.sh` — берёт исходники у Apple и накладывает всё это; `export.sh` — обратное действие.
 
 Собирается на Linux стоковым clang, без macOS и Xcode.
@@ -45,7 +45,7 @@ xnu-deps/setup.sh        # ~30 с: исходники зависимостей, 
 
 Правки делаются прямо в `xnu-src/xnu-8796.121.2` (обычное git-дерево Apple на ветке `redwood`). Перед коммитом
 в этот репозиторий — `xnu/export.sh` (перегенерирует патч и `files/`), а чтобы обновить готовое ядро в
-`prebuilt/` — `tools/update-prebuilt.sh`.
+`prebuilt/` без замены загрузчика и UEFI — `SKIP_UEFI=1 tools/update-prebuilt.sh`.
 
 **Две ловушки, каждая стоила по сборке.**
 
@@ -71,7 +71,7 @@ xnu-deps/setup.sh        # ~30 с: исходники зависимостей, 
 | `osfmk/minicrypto/` | замена corecrypto: MD5/SHA-1/SHA-2, HMAC, DRBG, AES (исходники Apple corecrypto не использованы) |
 | `iokit/Kernel/GenericARMPE.cpp` | эксперт платформы и CPU |
 | `iokit/Kernel/MiniIOSurface.*`, `MiniIOMobileFramebuffer.cpp`, `MiniAppleKeyStore.cpp` | замены закрытых драйверов: поверхности, экран (с масштабированием в панель и записью экрана), хранилище ключей |
-| `bsd/miscfs/packfs/`, `bsd/miscfs/ramfs/` | свои ФС: сжатый образ только для чтения (корень) и записываемая ФС в памяти |
+| `bsd/miscfs/apfs/`, `bsd/miscfs/ramfs/`, `bsd/dev/redwood_image.c` | APFS-контейнеры в RAM только для чтения (`/`, `/redwood`), записываемая ramfs (`/private/var`), чтение прошивок из APFS до монтирования |
 | `bsd/kern/kern_minimac.c`, `libkern/amfi/` | заглушки AMFI и Sandbox (MAC-политики), права из подписи программы |
 | `bsd/dev/redwood_input.c`, `redwood_goodix.c`, `redwood_virtio_input.c` | ввод: `/dev/redwood-touch`, драйвер Goodix GT9916 (SPI бит-бангом по GPIO), virtio-input для QEMU |
 | `bsd/dev/redwood_cpufreq.c` | частота процессора (Qualcomm EPSS) |
@@ -86,5 +86,33 @@ xnu-deps/setup.sh        # ~30 с: исходники зависимостей, 
 Патч, помимо врезок под всё это, чинит то, что мешает собрать и запустить открытый XNU вне Apple: makefile'ы под
 Linux, конфигурацию `BCM2837` (она взята за основу), ошибки в заброшенном коде (mockfs, не-PPL pmap, percpu на одном
 процессоре) и т. п.
+
+## APFS RAM boot
+
+The filesystem source is `files/bsd/miscfs/apfs/`, including decmpfs zlib
+decompression and the shared APFS reader. `bsd/dev/redwood_image.c` uses that
+reader for pre-mount GPU/Wi-Fi/ADSP firmware; firmware is generated uncompressed
+in contiguous extents so it can be used directly from RAM.
+
+APFS registration in `bsd/vfs/vfs_conf.c` must use `VFC_VFSGENERICARGS`, not
+`VFC_VFSLOCALARGS`. Both `apfs_mount()` and the rebuilt userland stage0 use a
+device-path string as mount data. Inheriting packfs's local `fspec` handling
+causes VFS to interpret the path bytes as a pointer and fail with `EFAULT`.
+Existing development trees must match the current registration in `renoir.patch`;
+a successful root mount alone does not prove that `/redwood` can mount.
+
+`userland/build.sh` and `tools/apfs/mkapfs.py` generate real APFS containers.
+`tools/apfs/convert-packfs.py` can extract preserved legacy source images and
+convert them with a rebuilt APFS stage0; the original images are left unchanged.
+See [recovery and conversion instructions](../recovery/README.md).
+`CHECK=1` runs independent `apfsck` and kernel-reader content comparisons.
+QEMU and a physical Renoir RAM boot confirmed read-only APFS on `/` and `/redwood`,
+writable ramfs on `/private/var`, and var write/read/unlink. The phone run, after
+Android/SurfaceFlinger initialization and a fresh resident-loader start, passed
+directory creation and **40 checks, 0 failed**. GPU step 21 succeeded and
+CoreAnimation drew frames through hardware OpenGL ES 3.2 / Mesa 26.2.5 / FD642.
+The captured home screen retained icons, text and wallpaper, with two partly
+unloaded widgets. This is not a performance/tearing improvement claim or a full
+system regression. No persistent-storage APFS boot or phone partition writes are enabled.
 
 Лицензия: производная работа от XNU, APSL 2.0.

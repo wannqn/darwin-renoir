@@ -1,47 +1,38 @@
 #!/bin/bash
-# Build Mesa for the iOS userland: the OpenGL ES library behind userland/src/eagl.c (see there and
-# userland/src/gl_osmesa.c). Mesa is fetched (a pinned release), patched with tools/mesa/*.patch and
-# built with the cross compiler of the kernel (xnu-deps/host/bin/xnu-clang, see xnu-deps/setup.sh)
-# against the iOS SDK that userland/build.sh uses; nothing of it is in the repository.
+# Build the Mesa26 OpenGL ES implementation behind userland/src/eagl.c and
+# gl_osmesa.c with the kernel's cross compiler and the userland iOS16.5 SDK.
 #
-#   DRIVERS="softpipe,freedreno"
-#                        the gallium drivers to build. softpipe: a rasterizer in plain C; it needs no
-#                        LLVM and nothing of the machine but its processor. freedreno: the Adreno's;
-#                        it talks to the kernel's GPU driver (the service RedwoodGPU) through
-#                        tools/mesa/redwood-drm, which stands in for libdrm (tools/mesa/freedreno-darwin.patch
-#                        makes Mesa build it where there is no DRM). The library takes the GPU when the
-#                        kernel has one and the environment does not say OSMESA_SOFTWARE=1.
+# The pinned upstream source is reconstructed by tools/mesa/prepare.py from
+# tools/mesa/mesa26's consolidated donor patch and verified source manifest,
+# then adapted for Renoir A642 (Gen6). Never apply the historical Mesa25
+# tools/mesa/*.patch stack or overwrite this source with the old AIR/DRM trees.
+# The donor's Gen8 paths remain generation-gated; this does not make A642 Gen8.
 #
-# What comes out, in xnu-deps/build/mesa/out:
-#   libOSMesa.8.dylib    everything in one library (install name /redwood/lib/libOSMesa.8.dylib): the
-#                        OpenGL (ES) entry points gl*, the compiler of the shading language, the drivers,
-#                        and the off-screen interface that hands out contexts
-#   exported-gl.txt      the gl* functions it exports, and
-#   gl.xml               their prototypes (the Khronos registry as Mesa has it): for userland/mkeagl.py
-# Needs on this machine: meson, ninja, bison, flex, python3 with venv (Mako is installed into a
-# private environment), llvm-ar.
+# DRIVERS defaults to softpipe,freedreno. RedwoodGPU supplies the MSM1.7
+# softpin ABI through the bundled Darwin DRM bridge. OSMESA_SOFTWARE=1 keeps
+# the existing explicit software-rendering path.
 #
-# This build is NOT reproducible byte for byte, so do not compare one of its outputs with another
-# by hash. Measured on 20 October: two builds from the same source tree, the second with
-# build-softpipe-freedreno deleted first, gave different libOSMesa.8.dylib and air_run -- same size
-# to the byte, 9 132 774 of 14 855 048 bytes different in the library and 4 171 752 of 9 789 824 in
-# air_run, with 5 of the 6 named text symbols at new addresses. So the layout moves between builds.
-# What moves it was not established; it is not source filenames, which -Db_ndebug=true compiles out.
-#
-# This is Mesa's property and not the build system's, which is worth knowing before anyone
-# distrusts every hash here: the userland programs reproduce exactly. prebuilt/userland/init built
-# in one working copy came out byte for byte identical to the same source built in another, at a
-# different time -- so there a hash does compare builds, and only for Mesa it does not.
-#
-# The practical consequence: a hash answers whether this is the same FILE, never whether it holds
-# the same CODE, and the size answers neither -- the one-line ir3 rounding patch
-# (tools/mesa/ir3-round-default.patch) produced a library of exactly the same 14 855 048 bytes as
-# the build without it. To tell whether a patch is in a build, read the source in
-# xnu-deps/build/mesa/mesa-$VERSION, which is where this script unpacks and patches it.
-set -e
-VERSION=25.0.7
-SHA256=592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6
+# Outputs in xnu-deps/build/mesa/out:
+#   libOSMesa.8.dylib  install name /redwood/lib/libOSMesa.8.dylib
+#   exported-gl.txt   exported gl* entry points for userland/mkeagl.py
+#   gl.xml            matching Khronos registry
+#   built-from        recipe/source/driver fingerprint, not a binary code hash
+# AIR=1 also builds the optional donor air_run diagnostic, not a Metal runtime.
+# Needs meson, ninja, bison, flex, python3 (3.12+ with venv), llvm-ar and the
+# xnu-deps cross tools. Build layout is not promised to reproduce byte-for-byte.
+set -eo pipefail
+VERSION=26.2.5
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+DRIVERS=${DRIVERS:-softpipe,freedreno}
+# Keep userland's freshness check identical to the build's. This mode needs
+# neither an SDK nor a configured xnu-deps environment.
+fingerprint() {
+	{ printf '%s\n' "$DRIVERS"; cat "$ROOT/tools/mk-mesa.sh" "$ROOT/tools/mesa/prepare.py" "$ROOT"/tools/mesa/mesa26/*; } | sha256sum
+}
+if [ "${1:-}" = --fingerprint ]; then
+	fingerprint
+	exit 0
+fi
 source "$ROOT/xnu-env.sh"
 B=$ROOT/xnu-deps/build/mesa
 SDK=$THEOS/sdks/iPhoneOS16.5.sdk
@@ -49,26 +40,16 @@ CC=$ROOT/xnu-deps/host/bin/xnu-clang
 mkdir -p "$B/out"
 cd "$B"
 
-# The sources are the archive's with tools/mesa/*.patch on top. When the patches change, a tree that was
-# patched with the earlier ones is of no use (and builds without a word into a library that does not match
-# the rest): the sources are taken from the archive again and everything is built anew, about a minute.
-PATCHES=$(cat "$ROOT"/tools/mesa/*.patch | sha256sum | cut -d' ' -f1)
+# Reconstruct from the archive when any preparation input changes; no patch
+# is applied twice. Leave old Mesa25 source/builds untouched and unused.
+PATCHES=$(cat "$ROOT/tools/mk-mesa.sh" "$ROOT/tools/mesa/prepare.py" "$ROOT"/tools/mesa/mesa26/* | sha256sum | cut -d' ' -f1)
 if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.redwood-patches 2>/dev/null)" != "$PATCHES" ]; then
 	[ -f mesa-$VERSION.tar.xz ] || curl -sL --fail -o mesa-$VERSION.tar.xz https://archive.mesa3d.org/mesa-$VERSION.tar.xz
-	echo "$SHA256  mesa-$VERSION.tar.xz" | sha256sum -c --quiet
-	rm -rf mesa-$VERSION build-*
-	tar xJf mesa-$VERSION.tar.xz
-	for p in "$ROOT"/tools/mesa/*.patch; do patch -s --no-backup-if-mismatch -d mesa-$VERSION -p1 < "$p"; done
+	rm -rf mesa-$VERSION build-$VERSION-*
+	rm -f out/air_run out/built-from
+	python3 "$ROOT/tools/mesa/prepare.py" --archive "$B/mesa-$VERSION.tar.xz" --output "$B/mesa-$VERSION"
 	echo "$PATCHES" > mesa-$VERSION/.redwood-patches
 fi
-# ours, kept in the repository: always the current ones
-rm -rf mesa-$VERSION/src/redwood-drm
-cp -r "$ROOT/tools/mesa/redwood-drm" mesa-$VERSION/src/redwood-drm
-# the AIR frontend (docs/air.md): the Metal runtime will call it in this
-# library's own process, and tools/mesa/air-frontend.patch is the meson that
-# reaches it. Copied rather than linked, because this tree is cross-built.
-rm -rf mesa-$VERSION/src/compiler/air
-cp -r "$ROOT/tools/mesa/air" mesa-$VERSION/src/compiler/air
 if [ ! -x venv/bin/python3 ]; then
 	python3 -m venv venv
 	venv/bin/pip -q install mako pyyaml packaging
@@ -96,16 +77,15 @@ endian = 'little'
 [properties]
 needs_exe_wrapper = true
 INI
-DRIVERS=${DRIVERS:-softpipe,freedreno}
-BUILD=build-${DRIVERS//,/-}
+BUILD=build-$VERSION-${DRIVERS//,/-}
 [ -f $BUILD/build.ninja ] || meson setup $BUILD mesa-$VERSION --cross-file cross.ini --wrap-mode=nofallback \
 	--prefix=/redwood --libdir=lib --buildtype=release -Db_ndebug=true \
 	-Dplatforms= -Dgallium-drivers="$DRIVERS" -Dfreedreno-kmds=msm -Dvulkan-drivers= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
 	-Dosmesa=true -Dllvm=disabled -Dshared-glapi=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true \
 	-Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
-	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-vdpau=disabled -Dgallium-va=disabled \
-	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
-ninja -C $BUILD > ninja.log
+	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-va=disabled \
+	-Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
+ninja -C $BUILD src/gallium/targets/osmesa/libOSMesa.8.dylib > ninja.log
 # air_run draws with a translated Metal shader and reads the pixels back; it is
 # the only way to find out whether the Adreno takes work that did not come from
 # the window server. Built only when asked, since it is a test program.
@@ -118,8 +98,8 @@ fi
 llvm-strip -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
 install_name_tool -id /redwood/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
 nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
-cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
-# (userland/build.sh comes here again when this no longer matches)
-cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/redwood-drm/* | sha256sum > out/built-from
+cp mesa-$VERSION/src/mesa/glapi/glapi/registry/gl.xml out/gl.xml
+# userland/build.sh asks this script for the same fingerprint.
+fingerprint > out/built-from
 echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/out/libOSMesa.8.dylib, $(stat -c %s out/libOSMesa.8.dylib) bytes," \
 	"$(wc -l < out/exported-gl.txt) gl* functions"

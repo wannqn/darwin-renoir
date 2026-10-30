@@ -1,7 +1,7 @@
 /*
  * The OpenGL ES library behind src/eagl.c when that library is Mesa as tools/mk-mesa.sh builds
  * it: any of its drivers that draws into memory, reached through its off-screen interface
- * (OSMesa, given an OpenGL ES profile by tools/mesa/osmesa-es-profile.patch).
+ * (OSMesa, with an OpenGL ES profile supplied by tools/mesa/mesa26's consolidated source).
  *
  * This file is all that knows which library draws. eagl.c wants four things besides the gl*
  * functions themselves: a context of a version of OpenGL ES, that context made the calling
@@ -87,8 +87,8 @@ redwood_gl_library(void)
 }
 
 /*
- * OES_EGL_image, with the IOSurface's ID as the image (tools/mesa/freedreno-darwin.patch: the
- * kernel's GPU driver makes a buffer of the surface's memory). The drivers that draw in memory
+ * OES_EGL_image, with the IOSurface's ID as the image (Mesa26's bundled Darwin DRM bridge:
+ * the kernel's GPU driver makes a buffer of the surface's memory). The drivers that draw in memory
  * of their own with this processor are not asked: they refuse every time.
  */
 int

@@ -153,7 +153,14 @@ static TUNABLE(uint32_t, gDiff, "fb_diff", 0);
 static TUNABLE(uint32_t, gFilter, "fb_filter", 1);
 static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 0);
-static TUNABLE(uint32_t, gDoubleBuffer, "fb_double", 1);
+/*
+ * Boot-arg fb_double=1: the frame is scaled into a copy in ordinary memory first and copied to the
+ * panel's memory afterwards. Without a tearing-effect signal or a page flip that hides no tear, and on
+ * the phone (30 October, rc.jobs.latency-bench, tools/smoothness.py) it cost the window server: the
+ * presenter took 5.4 ms a frame instead of 3.1 (median) and twice as many of the window server's own
+ * frames took over 16.7 ms, the copy's memory traffic beside the GPU's. Off by default.
+ */
+static TUNABLE(uint32_t, gDoubleBuffer, "fb_double", 0);
 /*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
  * drawRows()). Three by default: a frame is in the panel's memory 3 ms after its turn instead of 9
@@ -993,15 +1000,29 @@ void
 IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 {
 	uint32_t set = swapWord(swap, SWAP_LAYERS_SET);
-	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
+	uint64_t began = mach_absolute_time(), nanos, ready, shown, composed, drawn;
 	uint32_t layers = 0;
 	MiniIOSurface * recorded = NULL;
 	bool report;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
-			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
-			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+			static unsigned unfinishedReports;
+
+			if (unfinishedReports < 4) {
+				unfinishedReports++;
+				IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; dropped, the "
+				    "frame on the panel stays\n", swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+			}
+			fStatWaiting += mach_absolute_time() - began;
+			/* nothing of it is read: only its queue slot is given back (the presenter drops its surfaces) */
+			IOLockLock(fSwapLock);
+			fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+			fSwapsWaiting--;
+			fStatLost++;
+			IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+			IOLockUnlock(fSwapLock);
+			return;
 		}
 	}
 	fStatWaiting += mach_absolute_time() - began;
@@ -1031,12 +1052,6 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	shown = began;
-	/* its turn has come: the swap after it may be handed over */
-	IOLockLock(fSwapLock);
-	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
-	fSwapsWaiting--;
-	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
-	IOLockUnlock(fSwapLock);
 	IOLockLock(fLock);
 	if (fLastFrame != 0) {
 		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
@@ -1104,15 +1119,25 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 		}
 	}
+	composed = mach_absolute_time();
 	copyBackBuffer();
+	/*
+	 * Only now is the frame in the panel's memory: the swap after it may be handed over. Given back any
+	 * earlier, the window server would draw a frame more ahead of the panel than fb_queue says.
+	 */
+	IOLockLock(fSwapLock);
+	fSwapFirst = (fSwapFirst + 1) % SWAP_QUEUE;
+	fSwapsWaiting--;
+	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
+	IOLockUnlock(fSwapLock);
 	drawn = mach_absolute_time();
 	if (recorded != NULL) {
 		record(recorded);
 	}
 	fSwapsShown++;
 	if (gTouchLat) {
-		redwood_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
-		    micros(drawn));
+		redwood_tl("tl: v %u ready %llu shown %llu done %llu composed %llu\n", swapWord(swap, SWAP_ID), micros(ready),
+		    micros(shown), micros(drawn), micros(composed));
 	}
 	if (layers != fLayersShown) {
 		IOLog("MiniIOMobileFramebuffer: swap #%u: surfaces in layers 0x%x now (0x%x before): %u %u %u %u\n", fSwapsShown, layers,
@@ -1338,6 +1363,15 @@ IOMobileFramebufferUserClient::vsync(void)
 	IOLockUnlock(fLock);
 	if (send) {
 		sendAsyncResult64WithOptions(ref, kIOReturnSuccess, args, 6, kIOUserNotifyOptionCanDrop);
+		uint64_t late;
+
+		absolutetime_to_nanoseconds(mach_absolute_time() - now, &late);
+		if (gTouchLat && late > NSEC_PER_MSEC) {
+			/* tl: y COUNT due DUE late US: a refresh told to the window server over a millisecond late */
+			redwood_tl("tl: y %llu due %llu late %llu\n", fVSyncCount, micros(now), late / NSEC_PER_USEC);
+		}
+	} else if (gTouchLat) {
+		redwood_tl("tl: Y off at %llu\n", micros(mach_absolute_time()));
 	}
 }
 
@@ -1435,6 +1469,10 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		IOLockLock(fLock);
 		fCallbacks[in[2]] = in[0];
 		fRefcons[in[2]] = in[1];
+		if (in[2] == kFBNotifyVSync && gTouchLat) {
+			redwood_tl("tl: Y %s at %llu\n", in[0] != 0 ? (fVSyncRunning ? "on-running" : "on") : "asked-off",
+			    micros(mach_absolute_time()));
+		}
 		if (in[2] == kFBNotifyVSync && in[0] != 0 && !fVSyncRunning && !fClosed) {
 			fVSyncRunning = true;
 			armVSync();

@@ -67,6 +67,56 @@ work(void *arg)
 	return NULL;
 }
 
+/*
+ * How fast each processor really runs: 100 additions each of which needs the one before, a million
+ * times over, take 100 million cycles on any of these cores (one addition a cycle), whatever the
+ * frequency table was asked for. As many threads as processors at once, so that every one is busy,
+ * each says which processor it ran on and how many MHz it made.
+ */
+#define ADD10   "add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\t" \
+	        "add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\t"
+struct speed {
+	uint64_t microseconds;
+	size_t cpu;
+};
+
+static void *
+speed(void *arg)
+{
+	struct speed *s = arg;
+	uint64_t x = 0, t0, t1;
+	static mach_timebase_info_data_t timebase;
+
+	if (timebase.denom == 0) {
+		mach_timebase_info(&timebase);
+	}
+	t0 = mach_absolute_time();
+	for (unsigned i = 0; i < 1000000; i++) {
+		__asm__ volatile (ADD10 ADD10 ADD10 ADD10 ADD10 ADD10 ADD10 ADD10 ADD10 ADD10 : "+r" (x));
+	}
+	t1 = mach_absolute_time();
+	pthread_cpu_number_np(&s->cpu);
+	s->microseconds = (t1 - t0) * timebase.numer / timebase.denom / 1000;
+	return NULL;
+}
+
+static void
+clock_speeds(int threads)
+{
+	pthread_t thread[MOST];
+	struct speed result[MOST];
+
+	for (int i = 0; i < threads; i++) {
+		pthread_create(&thread[i], NULL, speed, &result[i]);
+	}
+	printf("cpu_test: clock (100 M dependent additions):");
+	for (int i = 0; i < threads; i++) {
+		pthread_join(thread[i], NULL);
+		printf(" cpu%zu %llu MHz", result[i].cpu, result[i].microseconds ? 100000000ULL / result[i].microseconds : 0);
+	}
+	printf("\n");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -111,5 +161,6 @@ main(int argc, char **argv)
 		}
 	}
 	printf("\n");
+	clock_speeds(threads);
 	return 0;
 }

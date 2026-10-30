@@ -10,5 +10,5 @@ never push to upstream unless separately requested.
 - Never publish passwords, access tokens or private keys. Runtime recovery images
   must be built with SHARE=1. Keep firmware separate from personal network config.
 - Phone testing is RAM-only: fastboot boot, resident stage/oem run. Never flash,
-  erase, unlock or repartition. APFS/persistent boot remains excluded.
+  erase, unlock or repartition. Persistent-storage APFS boot remains excluded; APFS images may boot from RAM only.
 - Before deleting local work verify branch heads, release assets and SHA256 checks.

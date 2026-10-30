@@ -39,8 +39,8 @@ if [ -n "$KERNEL" ] && [ ! -f "$K" ]; then
   echo "run-ios.sh: requested KERNEL=$K is missing" >&2; exit 1
 fi
 [ -f $K ] || { K=prebuilt/mach.development.bcm2837; echo "run-ios.sh: no kernel built here, using $K" >&2; }
-IMG=${IMG:-userland/system.packfs}
-ROOT=${ROOT:-userland/root.packfs}
+IMG=${IMG:-userland/system.apfs}
+ROOT=${ROOT:-userland/root.apfs}
 [ -f "$IMG" ] && [ -f "$ROOT" ] || { echo "run-ios.sh: $IMG or $ROOT is missing (userland/build.sh makes them)"; exit 1; }
 SECS=${1:-60}; shift
 RAM_BASE=0x40000000 RD_ADDR=0xFC000000

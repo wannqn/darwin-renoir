@@ -1,0 +1,52 @@
+Renoir's A642 is Gen6, not the donor's A830/Gen8. Keep its chip-id
+match ahead of FD660's wildcard, its LPDDR4X bank swizzle and register
+values, expressed in Mesa26's split magic/raw register schema.
+This is the only board patch applied after the verified consolidated patch;
+none of the historical Mesa25 patches belong on the Mesa26 source tree.
+
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -620,6 +620,43 @@
+         ],
+     ))
+ 
++# Renoir / SM7350: A660-family command layout, but LPDDR4X bank swizzle.
++# Must precede generic FD660's wildcard patch-id match.
++add_gpus([
++        GPUId(chip_id=0xffff06060010, name="FD642"),
++    ], A6xxGPUInfo(
++        CHIP.A6XX,
++        [a6xx_base, a6xx_gen4],
++        num_ccu = 3,
++        tile_align_w = 96,
++        tile_align_h = 16,
++        tile_max_w = 1024,
++        tile_max_h = 1024,
++        num_vsc_pipes = 32,
++        cs_shared_mem_size = 32 * 1024,
++        wave_granularity = 2,
++        fibers_per_sp = 128 * 2 * 16,
++        highest_bank_bit = 14,
++        magic_regs = dict(
++            RB_DBG_ECO_CNTL = 0x04100000,
++            RB_DBG_ECO_CNTL_blit = 0x04100000,
++            RB_RBP_CNTL = 0x0,
++        ),
++        raw_magic_regs = [
++            [A6XXRegs.REG_A6XX_PC_MODE_CNTL, 0x1f],
++            [A6XXRegs.REG_A6XX_PC_POWER_CNTL, 2],
++            [A6XXRegs.REG_A6XX_VFD_POWER_CNTL, 2],
++            [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL, 0x05008000],
++            [A6XXRegs.REG_A6XX_GRAS_DBG_ECO_CNTL, 0],
++            [A6XXRegs.REG_A6XX_SP_CHICKEN_BITS, 0x00001400],
++            [A6XXRegs.REG_A6XX_SP_DBG_ECO_CNTL, 0x01000000],
++            [A6XXRegs.REG_A6XX_HLSQ_DBG_ECO_CNTL, 0],
++            [A6XXRegs.REG_A6XX_VPC_DBG_ECO_CNTL, 0x02000000],
++            [A6XXRegs.REG_A6XX_UCHE_UNKNOWN_0E12, 0x1],
++            [A6XXRegs.REG_A6XX_UCHE_CLIENT_PF, 0x84],
++        ],
++    ))
++
+ add_gpus([
+         GPUId(660),
+     ], A6xxGPUInfo(

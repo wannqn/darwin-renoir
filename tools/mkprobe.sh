@@ -18,4 +18,4 @@ xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding \
   -fno-stack-protector -fno-builtin -Wl,-e,_start \
   -Wl,-pagezero_size,0x100000000 tools/probe_pid1.c \
   -o logs/wifi-probe-root/sbin/launchd
-python3 mkpackfs.py -o logs/wifi-probe.packfs logs/wifi-probe-root
+python3 tools/apfs/mkapfs.py -z --plain fw --plain fw-wifi-renoir -o logs/wifi-probe.apfs Probe=logs/wifi-probe-root

@@ -48,6 +48,11 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <mach/mach.h>
+#include <pthread.h>
+
+extern const void *_dyld_get_shared_cache_range(size_t *length);
+#define CACHE_BASE 0x180000000UL                /* where the cache was built to be, before the slide */
 
 /* where what is said goes: the standard error, which is the console's for SpringBoard (an application's is nowhere) */
 static int say_fd = 2;
@@ -86,15 +91,313 @@ now_us(void)
 	return mach_absolute_time() * timebase.numer / timebase.denom / 1000;
 }
 
+/*
+ * Boot-arg sb_sample=1 (with touch_lat=1): where SpringBoard's main thread spends a long turn of its
+ * run loop. A thread of ours stops it every millisecond for a moment and writes down its program
+ * counter and the return addresses on its stack (frame pointers); a turn of 50 ms or more is then said
+ * as its most frequent places, leaf first and then anywhere on the stack:
+ *   tl: A WOKE DONE SAMPLES leaf|stack COUNT IMAGE SYMBOL+OFFSET UNSLID
+ * (SYMBOL is dladdr()'s, the nearest exported one before the address; UNSLID is the address the
+ * shared cache was built for, for a symbolizer that knows the private ones too.)
+ */
+#define SAMPLE_DEPTH    24
+#define SAMPLE_RING     4096
+#define SAMPLE_TURN_US  50000
+struct main_sample {
+	uint64_t at;
+	uint32_t depth;
+	uint64_t pc[SAMPLE_DEPTH];
+};
+static struct main_sample *main_samples;
+static volatile uint64_t main_sample_count;
+static thread_act_t main_thread;
+static uintptr_t main_stack_low, main_stack_high;
+
+static void *
+sample_main(__unused void *unused)
+{
+	pthread_setname_np("redwood: main thread sampler");
+	for (;;) {
+		arm_thread_state64_t state;
+		mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+		struct main_sample *s = &main_samples[main_sample_count % SAMPLE_RING];
+		uintptr_t fp;
+
+		usleep(1000);
+		if (thread_suspend(main_thread) != KERN_SUCCESS) {
+			continue;
+		}
+		if (thread_get_state(main_thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count) == KERN_SUCCESS) {
+			s->at = now_us();
+			s->pc[0] = arm_thread_state64_get_pc(state);
+			s->depth = 1;
+			fp = arm_thread_state64_get_fp(state);
+			s->pc[s->depth++] = arm_thread_state64_get_lr(state);
+			while (s->depth < SAMPLE_DEPTH && fp >= main_stack_low && fp + 16 <= main_stack_high && (fp & 7) == 0) {
+				uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+
+				if (ret == 0) {
+					break;
+				}
+				s->pc[s->depth++] = ret;
+				if (next <= fp) {
+					break;
+				}
+				fp = next;
+			}
+			thread_resume(main_thread);
+			main_sample_count++;
+		} else {
+			thread_resume(main_thread);
+		}
+	}
+	return NULL;
+}
+
+struct place_count {
+	uint64_t key;
+	uint32_t count;
+};
+
+static void
+count_place(struct place_count *places, unsigned *used, unsigned room, uint64_t key)
+{
+	for (unsigned i = 0; i < *used; i++) {
+		if (places[i].key == key) {
+			places[i].count++;
+			return;
+		}
+	}
+	if (*used < room) {
+		places[(*used)++] = (struct place_count){ key, 1 };
+	}
+}
+
+static int
+by_count(const void *a, const void *b)
+{
+	return (int)((const struct place_count *)b)->count - (int)((const struct place_count *)a)->count;
+}
+
+/*
+ * The private functions of the shared cache have no names here (dladdr() says "<redacted>"), but its
+ * Objective-C methods do: a table of every method's implementation in the images below, sorted, and
+ * the method an address falls in is the nearest one before it in the same image.
+ */
+struct method_place {
+	uintptr_t imp;
+	const char *image;
+	char name[120];
+};
+static struct method_place *methods;
+static size_t method_count;
+
+static int
+by_imp(const void *a, const void *b)
+{
+	uintptr_t x = ((const struct method_place *)a)->imp, y = ((const struct method_place *)b)->imp;
+
+	return x < y ? -1 : x > y;
+}
+
+static void
+add_methods(Class cls, bool meta, const char *image, size_t *room)
+{
+	unsigned count = 0;
+	Method *list = class_copyMethodList(cls, &count);
+
+	for (unsigned i = 0; i < count; i++) {
+		if (method_count == *room) {
+			*room = *room != 0 ? *room * 2 : 65536;
+			methods = realloc(methods, *room * sizeof(*methods));
+		}
+		methods[method_count].imp = (uintptr_t)method_getImplementation(list[i]);
+		methods[method_count].image = image;
+		snprintf(methods[method_count].name, sizeof(methods[method_count].name), "%c[%s %s]", meta ? '+' : '-',
+		    class_getName(cls), sel_getName(method_getName(list[i])));
+		method_count++;
+	}
+	free(list);
+}
+
+static void
+make_method_table(void)
+{
+	static const char *const images[] = { "SpringBoard", "SpringBoardUI", "SpringBoardHome", "SpringBoardFoundation",
+		"SplashBoard", "FrontBoard", "FrontBoardServices", "BaseBoard", "BaseBoardUI", "BoardServices", "UIKitCore",
+		"QuartzCore", "RunningBoardServices", "Foundation", "CoreFoundation", "SpringBoardServices", "CoverSheet",
+		"SpringBoardUIServices", "UIKitServices", "ImageIO", "CoreGraphics", "IOSurface", "PosterKit", "Widgets" };
+	unsigned image_count = 0;
+	const char **paths = objc_copyImageNames(&image_count);
+	size_t room = 0;
+
+	for (unsigned i = 0; i < image_count; i++) {
+		const char *base = strrchr(paths[i], '/') != NULL ? strrchr(paths[i], '/') + 1 : paths[i];
+		bool wanted = false;
+
+		for (unsigned j = 0; j < sizeof(images) / sizeof(images[0]) && !wanted; j++) {
+			wanted = strcmp(base, images[j]) == 0;
+		}
+		if (!wanted) {
+			continue;
+		}
+		unsigned class_count = 0;
+		const char **names = objc_copyClassNamesForImage(paths[i], &class_count);
+
+		for (unsigned c = 0; c < class_count; c++) {
+			Class cls = objc_getClass(names[c]);
+
+			if (cls != Nil) {
+				add_methods(cls, false, base, &room);
+				add_methods(object_getClass((id)cls), true, base, &room);
+			}
+		}
+		free(names);
+	}
+	free(paths);
+	if (methods != NULL) {
+		qsort(methods, method_count, sizeof(*methods), by_imp);
+	}
+	say("redwood: main thread sampler: %zu Objective-C methods to name places with\n", method_count);
+}
+
+static const char *
+method_at(uintptr_t address, const char *image)
+{
+	size_t low = 0, high = method_count;
+
+	while (low < high) {
+		size_t mid = (low + high) / 2;
+
+		if (methods[mid].imp <= address) {
+			low = mid + 1;
+		} else {
+			high = mid;
+		}
+	}
+	return low > 0 && strcmp(methods[low - 1].image, image) == 0 && address - methods[low - 1].imp < 0x8000 ?
+	       methods[low - 1].name : NULL;
+}
+
+static void
+say_places(uint64_t woke, uint64_t done, unsigned samples, const char *what, struct place_count *places, unsigned used)
+{
+	size_t length = 0;
+	uintptr_t cache = (uintptr_t)_dyld_get_shared_cache_range(&length);
+
+	if (methods == NULL) {
+		make_method_table();
+	}
+	qsort(places, used, sizeof(*places), by_count);
+	for (unsigned i = 0; i < used && i < 16; i++) {
+		Dl_info info;
+		const char *image = "?", *symbol = "?", *method;
+		uintptr_t offset = 0, address = (uintptr_t)places[i].key;
+
+		if (dladdr((const void *)address, &info) != 0) {
+			image = info.dli_fname != NULL && strrchr(info.dli_fname, '/') != NULL ? strrchr(info.dli_fname, '/') + 1 :
+			    info.dli_fname != NULL ? info.dli_fname : "?";
+			symbol = info.dli_sname != NULL ? info.dli_sname : "?";
+			offset = info.dli_saddr != NULL ? address - (uintptr_t)info.dli_saddr : 0;
+		}
+		if (strcmp(symbol, "<redacted>") == 0 && (method = method_at(address, image)) != NULL) {
+			symbol = method;
+			offset = 0;
+		}
+		say("tl: A %llu %llu %u %s %u %s %s+%#lx %#lx\n", woke, done, samples, what, places[i].count, image, symbol,
+		    (unsigned long)offset, (unsigned long)(address >= cache && address < cache + length ?
+		    address - cache + CACHE_BASE : 0));
+	}
+}
+
+static void
+say_long_turn(uint64_t woke, uint64_t done)
+{
+	static struct place_count leaves[256], stacks[1024];
+	unsigned used_leaves = 0, used_stacks = 0, samples = 0;
+	uint64_t last = main_sample_count;
+
+	for (uint64_t n = last > SAMPLE_RING ? last - SAMPLE_RING : 0; n < last; n++) {
+		const struct main_sample *s = &main_samples[n % SAMPLE_RING];
+
+		if (s->at < woke || s->at > done) {
+			continue;
+		}
+		samples++;
+		count_place(leaves, &used_leaves, 256, s->pc[0]);
+		for (uint32_t d = 0; d < s->depth; d++) {
+			bool again = false;
+
+			for (uint32_t e = 0; e < d && !again; e++) {
+				again = s->pc[e] == s->pc[d];   /* (recursion: a place once a sample) */
+			}
+			if (!again) {
+				count_place(stacks, &used_stacks, 1024, s->pc[d]);
+			}
+		}
+	}
+	if (samples != 0) {
+		say_places(woke, done, samples, "leaf", leaves, used_leaves);
+		say_places(woke, done, samples, "stack", stacks, used_stacks);
+	}
+}
+
+/* The processor time the main thread has had so far, in microseconds: in the kernel (`system`) and all of it. */
+static uint64_t
+main_cpu_us(uint64_t *system)
+{
+	thread_basic_info_data_t basic;
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+
+	if (thread_info(main_thread, THREAD_BASIC_INFO, (thread_info_t)&basic, &count) != KERN_SUCCESS) {
+		*system = 0;
+		return 0;
+	}
+	*system = (uint64_t)basic.system_time.seconds * 1000000 + basic.system_time.microseconds;
+	return (uint64_t)basic.user_time.seconds * 1000000 + basic.user_time.microseconds + *system;
+}
+
+/* The page faults of the whole process so far (and of them, those that had to read: pageins). */
+static uint64_t
+task_faults(uint64_t *pageins)
+{
+	task_events_info_data_t events;
+	mach_msg_type_number_t count = TASK_EVENTS_INFO_COUNT;
+
+	if (task_info(mach_task_self(), TASK_EVENTS_INFO, (task_info_t)&events, &count) != KERN_SUCCESS) {
+		*pageins = 0;
+		return 0;
+	}
+	*pageins = (uint64_t)events.pageins;
+	return (uint64_t)events.faults;
+}
+
 static void
 main_loop_turn(__unused CFRunLoopObserverRef observer, CFRunLoopActivity activity, void *info)
 {
+	static uint64_t woke_cpu, woke_system, woke_faults, woke_pageins;
+
 	if (activity == kCFRunLoopAfterWaiting) {
 		main_woke = now_us();
+		if (main_samples != NULL) {
+			woke_cpu = main_cpu_us(&woke_system);
+			woke_faults = task_faults(&woke_pageins);
+		}
 	} else if (activity == kCFRunLoopBeforeWaiting && info == NULL) {
 		commit_began = now_us();
 	} else if (activity == kCFRunLoopBeforeWaiting && main_woke != 0) {
-		say("tl: a %llu %llu %llu\n", main_woke, commit_began, now_us());
+		uint64_t done = now_us();
+
+		say("tl: a %llu %llu %llu\n", main_woke, commit_began, done);
+		if (main_samples != NULL && done - main_woke >= SAMPLE_TURN_US) {
+			uint64_t system, pageins, cpu = main_cpu_us(&system), faults = task_faults(&pageins);
+
+			/* tl: B WOKE DONE CPU SYSTEM FAULTS PAGEINS: of the turn, the thread's time on a processor (and in
+			 * the kernel), and the process's page faults meanwhile (and of them, reads) */
+			say("tl: B %llu %llu %llu %llu %llu %llu\n", main_woke, done, cpu - woke_cpu, system - woke_system,
+			    faults - woke_faults, pageins - woke_pageins);
+			say_long_turn(main_woke, done);
+		}
 		main_woke = 0;
 	}
 }
@@ -115,6 +418,20 @@ watch_main_loop(void)
 	    main_loop_turn, NULL), kCFRunLoopCommonModes);
 	CFRunLoopAddObserver(CFRunLoopGetMain(), CFRunLoopObserverCreate(NULL, kCFRunLoopBeforeWaiting, true, CA_COMMIT_ORDER - 1,
 	    main_loop_turn, NULL), kCFRunLoopCommonModes);
+	if (strstr(args, "sb_sample=1") != NULL && (main_samples = calloc(SAMPLE_RING, sizeof(*main_samples))) != NULL) {
+		pthread_t sampler;
+		pthread_attr_t attr;
+
+		main_thread = mach_thread_self();
+		main_stack_high = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+		main_stack_low = main_stack_high - pthread_get_stacksize_np(pthread_self());
+		pthread_attr_init(&attr);
+		pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+		if (pthread_create(&sampler, &attr, sample_main, NULL) == 0) {
+			pthread_detach(sampler);
+		}
+		pthread_attr_destroy(&attr);
+	}
 	{
 		CFRunLoopObserverContext after = { .info = (void *)1 };
 

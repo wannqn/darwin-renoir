@@ -12,11 +12,18 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 mesa = ROOT / 'xnu-deps/build/mesa'
-source = mesa / 'mesa-25.0.7/src/freedreno/common'
-registers = next(mesa.glob('build-*/src/freedreno/registers/adreno/a6xx.py'))
+source = mesa / 'mesa-26.2.5/src/freedreno/common'
+registers = next(mesa.glob('build-26.2.5-*/src/freedreno/registers/adreno/a6xx.py'))
 sys.argv = [str(source / 'freedreno_devices.py'), '-p', str(registers.parent)]
+sys.path.insert(0, str(source))  # Mesa26 splits generator types into freedreno_dev_info.py.
 with redirect_stdout(io.StringIO()):
     data = runpy.run_path(sys.argv[0])
+renoir = next(info for gpu, info in data['s'].gpus.items() if gpu.name == 'FD642')
+assert renoir.chip == data['CHIP'].A6XX.value
+assert renoir.num_ccu == 3 and renoir.highest_bank_bit == 14
+assert (renoir.tile_align_w, renoir.tile_align_h) == (96, 16)
+assert (renoir.tile_max_w, renoir.tile_max_h) == (1024, 1024)
+assert dict(renoir.magic_raw)[int(data['A6XXRegs'].REG_A6XX_UCHE_CLIENT_PF)] == 0x84
 records = ',\n'.join(
     '{{%d, 0x%xull}, "%s", %d}' % (gpu.gpu_id, gpu.chip_id, gpu.name, info.highest_bank_bit)
     for gpu, info in data['s'].gpus.items())

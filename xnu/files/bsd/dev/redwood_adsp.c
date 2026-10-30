@@ -85,7 +85,6 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <vm/memory_types.h>
-#include <miscfs/packfs/packfs.h>
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/kauth.h>
@@ -105,8 +104,6 @@ extern uint64_t kvtophys(vm_offset_t va);
 extern void loader_return(void);
 extern kern_return_t thread_terminate(thread_t thread);
 extern vm_offset_t pe_arm_get_soc_base_phys(void);
-extern dev_t mdevlookup(int devid);
-extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 
 /* What the Wi-Fi's DSP and this one both use (redwood_wifi.c). */
 extern lck_mtx_t redwood_aop_mailbox_lock;
@@ -980,26 +977,6 @@ step_survey(void)
 static uint32_t adsp_memory_size = 0x04000000u; /* Redwood 64 MiB; Renoir 48 MiB (shima.dtsi). */
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
 
-/* An entry of a directory of a packfs image in memory, by name (as in redwood_wifi.c). */
-static const struct packfs_dnode *
-image_entry(const uint8_t *image, const struct packfs_super *super, const struct packfs_dnode *directory, const char *name)
-{
-	const struct packfs_dnode *nodes = (const struct packfs_dnode *)(image + super->ps_nodes_off);
-	size_t length = strlen(name);
-
-	if (directory == NULL || !S_ISDIR(directory->pd_mode) || directory->pd_data + directory->pd_size > super->ps_node_count) {
-		return NULL;
-	}
-	for (uint64_t i = 0; i < directory->pd_size; i++) {
-		const struct packfs_dnode *node = &nodes[directory->pd_data + i];
-
-		if (node->pd_name_len == length && (uint64_t)node->pd_name + length <= super->ps_strings_size &&
-		    memcmp(image + super->ps_strings_off + node->pd_name, name, length) == 0) {
-			return node;
-		}
-	}
-	return NULL;
-}
 
 /*
  * A file of /fw on the root file system, read whole into memory of ours: the system image, where
@@ -1066,33 +1043,15 @@ redwood_adsp_fw_free(const uint8_t *data, uint64_t size)
 }
 
 /* A file of fw/ in the small image (ADSP=1 userland/build.sh puts fw-audio/ there), else of /fw on the root (above). */
+extern const uint8_t *redwood_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 static const uint8_t *
 image_file(const char *name, uint64_t *size)
 {
-	for (int disk = 1; disk >= 0; disk--) {
-		const struct packfs_super *super;
-		const struct packfs_dnode *file;
-		vm_offset_t base = 0;
-		uint64_t length = 0;
-		dev_t dev = mdevlookup(disk);
+	{
+		const uint8_t *data = redwood_image_file("fw", name, size, NULL);  /* (redwood_image.c) */
 
-		if (dev == (dev_t)-1 || mdevgetkernelrange(dev, &base, &length) != 0 || length < PACKFS_SUPER_SIZE) {
-			continue;
-		}
-		super = (const struct packfs_super *)base;
-		if (memcmp(super->ps_magic, PACKFS_MAGIC, sizeof(super->ps_magic)) != 0 || super->ps_image_size > length ||
-		    super->ps_node_count == 0 ||
-		    super->ps_nodes_off + (uint64_t)super->ps_node_count * sizeof(struct packfs_dnode) > super->ps_image_size ||
-		    super->ps_strings_off + super->ps_strings_size > super->ps_image_size) {
-			continue;
-		}
-		file = (const struct packfs_dnode *)(base + super->ps_nodes_off);
-		file = image_entry((const uint8_t *)base, super, file, redwood_board_is("renoir") ? "fw-audio-renoir" : "fw");
-		file = image_entry((const uint8_t *)base, super, file, name);
-		if (file != NULL && S_ISREG(file->pd_mode) && !(file->pd_flags & PACKFS_F_CHUNKED) &&
-		    file->pd_data + file->pd_size <= super->ps_image_size) {
-			*size = file->pd_size;
-			return (const uint8_t *)base + file->pd_data;
+		if (data != NULL) {
+			return data;
 		}
 	}
 	{

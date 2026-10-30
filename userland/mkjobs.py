@@ -13,7 +13,7 @@ The program itself must be there at run time; a warning is printed if it will no
 
 For this Renoir RAM port, availability is checked against the selected system image
 and the extracted OS/App cryptexes. Full-volume/APFS job selection is deliberately
-not imported; a daemon omitted from the packfs image must not be advertised as present.
+not imported; a daemon omitted from the selected root image must not be advertised as present.
 
 With --rest, the other jobs of iOS follow (their standard error on the console as well, their os_log
 only when named in OSLOG), and with them the "launch angels" (System/Library/LaunchAngels: the

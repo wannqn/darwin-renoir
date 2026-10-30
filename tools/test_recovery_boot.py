@@ -39,6 +39,20 @@ def entries(data):
     raise AssertionError('Missing container terminator')
 
 
+def apfs_image():
+    header = bytearray(4096)
+    header[32:36] = b'NXSB'
+    struct.pack_into('<IQ', header, 36, 4096, 1)
+    first = second = 0
+    for word in struct.unpack_from('<1022I', header, 8):
+        first = (first + word) % 0xffffffff
+        second = (second + first) % 0xffffffff
+    low = 0xffffffff - (first + second) % 0xffffffff
+    high = 0xffffffff - (first + low) % 0xffffffff
+    struct.pack_into('<Q', header, 0, (high << 32) | low)
+    return bytes(header)
+
+
 class BootTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='recovery-boot-')
@@ -48,7 +62,9 @@ class BootTests(unittest.TestCase):
             (self.root / folder).mkdir(parents=True)
         for name in ['boot.py', 'payload.py']:
             shutil.copyfile(ROOT / 'recovery' / name, self.root / 'recovery' / name)
-        (self.root / 'userland/system.packfs').write_bytes(b'system image')
+        (self.root / 'userland/system.packfs').write_bytes(b'archived system image')
+        (self.root / 'userland/system.apfs').write_bytes(apfs_image())
+        (self.root / 'userland/root.apfs').write_bytes(apfs_image())
         (self.root / 'prebuilt/renoir/resident-usb.img').write_bytes(b'resident loader')
         (self.root / 'prebuilt/mach.development.bcm2837').write_bytes(b'current tested kernel')
         (self.root / 'fw-wifi/mac').write_text('02:aa:bb:cc:dd:ee')
@@ -136,11 +152,13 @@ elif args[:1] not in (['stage'],['oem']):sys.exit('Unexpected command')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = entries((self.root / 'recovery/assets/run-current.bin').read_bytes())
         self.assertEqual(payload[b'kernel'], b'current tested kernel')
-        self.assertEqual(payload[b'ramdisk'], b'password-free root')
+        self.assertEqual(payload[b'ramdisk'], apfs_image())
         self.assertIn(b'wifi_mac=02:11:22:33:44:55', payload[b'cmdline'])
         self.assertNotIn(b'02:aa:bb:cc:dd:ee', payload[b'cmdline'])
         self.assertEqual(payload[b'cmdline'].count(b'wifi_mac='), 1)
         calls = self.calls()
+        stages = [call[-1] for call in calls if 'stage' in call]
+        self.assertEqual(Path(stages[0]).name, 'system.apfs')
         self.assertEqual(calls[-1], ['-s', 'xnuloader', 'oem', 'run'])
         for call in calls:
             operation = call[2] if call[:1] == ['-s'] else call[0]
@@ -151,6 +169,25 @@ elif args[:1] not in (['stage'],['oem']):sys.exit('Unexpected command')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = entries((self.root / 'recovery/assets/run-current.bin').read_bytes())
         self.assertEqual(payload[b'kernel'], b'earlier fallback kernel')
+        self.assertEqual(payload[b'ramdisk'], b'password-free root')
+        stages = [call[-1] for call in self.calls() if 'stage' in call]
+        self.assertEqual(Path(stages[0]).name, 'system.packfs')
+
+    def test_bad_apfs_never_contacts_phone(self):
+        for name in ('root.apfs', 'system.apfs'):
+            target = self.root / 'userland' / name
+            target.write_bytes(b'PACKFS1 legacy')
+            result = self.run_boot(self.mac)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('APFS', result.stderr)
+            self.assertFalse(self.calls())
+            target.write_bytes(apfs_image())
+
+    def test_fallback_needs_no_apfs_artifacts(self):
+        (self.root / 'userland/root.apfs').unlink()
+        (self.root / 'userland/system.apfs').unlink()
+        result = self.run_boot([*self.mac, '--last-phone-good'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_custom_kernel(self):
         kernel = self.root / 'custom.kernel'

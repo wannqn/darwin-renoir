@@ -9,14 +9,9 @@
  */
 #include "mini.h"
 
-struct device_mount_args {
-	const char *fspec;
-};
-
 int
 main(int argc, char **argv, char **envp)
 {
-	struct device_mount_args args = { .fspec = "/dev/md1" };
 	char *init_argv[] = { "/redwood/sbin/init", NULL };
 	int fd = open("/dev/console", O_RDWR, 0);
 
@@ -28,7 +23,7 @@ main(int argc, char **argv, char **envp)
 		close(fd);
 	}
 
-	if (mount("packfs", "/redwood", MNT_RDONLY, &args) != 0) {
+	if (mount("apfs", "/redwood", MNT_RDONLY, "/dev/md1") != 0) {
 		printf("stage0: cannot mount /dev/md1 on /redwood: %s\n", strerror(errno));
 	} else {
 		execve(init_argv[0], init_argv, envp);

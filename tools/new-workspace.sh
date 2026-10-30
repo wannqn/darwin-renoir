@@ -59,10 +59,9 @@ done
 for d in "$ROOT"/fw-*; do
 	if [ -d "$d" ]; then ln -s "$d" ./; fi
 done
-for f in obj system.packfs root.packfs hello; do
+for f in obj system.apfs root.apfs hello; do
 	if [ -e "$ROOT/userland/$f" ]; then cp -a --reflink=auto "$ROOT/userland/$f" userland/; fi
 done
-cp -a --reflink=auto "$ROOT/userland/obj" "$ROOT/userland/system.packfs" "$ROOT/userland/root.packfs" "$ROOT/userland/hello" userland/
 [ -f "$ROOT/xnuloader/loader.efi" ] && cp -a "$ROOT/xnuloader/loader.efi" xnuloader/
 [ -f "$ROOT/qemu/kernel.syms" ] && cp -a "$ROOT/qemu/kernel.syms" qemu/
 echo "$INSTANCE" > qemu/instance

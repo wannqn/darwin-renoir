@@ -13,10 +13,10 @@
  * drawn into a 32-bit-float render target and one pixel is printed, so the
  * result is a number and not a picture.
  *
- * On this machine the screen is softpipe, so the whole path can be run with no
- * GPU at all. On the phone the same source wants the freedreno screen that
- * tools/mesa/freedreno-darwin.patch already creates inside the port's Mesa
- * (osmesa_create_gpu_screen), and nothing else about it changes.
+ * This is the Mesa25 host-development copy used by tools/air/mk-host.sh.
+ * The phone's Mesa26 build uses the AIR source in the verified consolidated
+ * tools/mesa/mesa26 patch instead; this directory is not copied over it.
+ * The GLES runtime does not enable a Metal driver.
  *
  * usage: air_run FILE[.metallib] [FUNCTION]
  */
@@ -844,7 +844,7 @@ main(int argc, char **argv)
     * otherwise. The same source therefore runs on this machine (no msm
     * device, so it falls back and draws in software) and on the phone, where
     * it opens the Adreno exactly as the port's own Mesa does
-    * (osmesa_create_gpu_screen in tools/mesa/freedreno-darwin.patch).
+    * (osmesa_create_gpu_screen in src/gallium/targets/osmesa/osmesa_target.c).
     * AIR_RUN_SOFTWARE=1 forces software even where a GPU is present.
     */
    struct pipe_screen *screen = NULL;
@@ -858,8 +858,8 @@ main(int argc, char **argv)
           * dereferences it. A zeroed one died at address 0x10 on the phone --
           * the first thing this program ever did on a machine that has a GPU,
           * and invisible on any machine that has not. This is the sequence
-          * osmesa_create_gpu_screen() uses in tools/mesa/freedreno-darwin.patch,
-          * which is the one CoreAnimation goes through on this device daily.
+          * Mesa's osmesa_create_gpu_screen() uses, which is the path
+          * CoreAnimation goes through on this device.
           */
          static const driOptionDescription freedreno_options[] = {
 #include "freedreno/driinfo_freedreno.h"

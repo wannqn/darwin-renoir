@@ -1,55 +1,44 @@
 #!/usr/bin/env python3
-"""Check early GPU firmware is readable in an actual Renoir packfs RAM image.
+"""Check Renoir GPU firmware in the actual APFS image passed to mkpayload.
 
-The kernel's pre-mount firmware reader accepts plain files only, even though
-mounted packfs supports LZ4/Zstd. Run this on the image passed to mkpayload.
+Firmware is deliberately kept uncompressed in one extent so redwood_image_file
+can return a pointer into the resident RAM image without allocation or copying.
 """
 import hashlib
-import stat
-import struct
 import sys
 from pathlib import Path
 
-SUPER = struct.Struct('<8sIIQQQQQQ')
-NODE = struct.Struct('<IIIIQQIIIIQQ')
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'apfs'))
+import apfs
+
 
 def check(path, firmware):
-    data = Path(path).read_bytes()
-    if len(data) < 4096:
-        raise ValueError('truncated packfs superblock')
-    magic, block, count, nodes, strings, strings_size, _, image_size, _ = SUPER.unpack_from(data)
-    if (magic != b'PACKFS1\0' or not count or image_size > len(data) or
-        nodes + count * NODE.size > image_size or strings + strings_size > image_size):
-        raise ValueError('invalid packfs bounds')
-    entries = [NODE.unpack_from(data, nodes+i*NODE.size) for i in range(count)]
-    def child(parent, name):
-        for i,n in enumerate(entries):
-            if i == parent or n[6] != parent:
-                continue
-            if n[7] + n[8] > strings_size:
-                raise ValueError('invalid packfs name bounds')
-            if data[strings+n[7]:strings+n[7]+n[8]] == name.encode():
-                return i
-        raise ValueError('missing '+name)
-    directory = child(0, 'fw-renoir')
-    if not stat.S_ISDIR(entries[directory][0]):
-        raise ValueError('fw-renoir is not a directory')
-    for name in ('a660_gmu.bin','a660_sqe.fw','a660_zap.elf'):
-        n = entries[child(directory,name)]
-        if not stat.S_ISREG(n[0]) or n[11] != 0:
-            raise ValueError(name+': early GPU reader requires an uncompressed regular file')
-        if not n[4] or n[5]+n[4] > image_size:
-            raise ValueError(name+': invalid firmware extent')
-        actual=data[n[5]:n[5]+n[4]]
-        expected=(Path(firmware)/name).read_bytes()
-        if actual != expected:
-            raise ValueError(name+': differs from local Renoir firmware')
-        print(name, len(actual), 'plain, SHA256',hashlib.sha256(actual).hexdigest())
+    container = apfs.Container(str(path))
+    try:
+        volume = apfs.pick_volume(container, None)
+        for name in ('a660_gmu.bin', 'a660_sqe.fw', 'a660_zap.elf'):
+            hit = volume.lookup('/fw-renoir/' + name)
+            if hit is None:
+                raise ValueError('missing fw-renoir/' + name)
+            inode = volume.inode(hit[0])
+            if not inode.is_reg or inode.decmpfs is not None or not inode.size:
+                raise ValueError(name + ': expected an uncompressed nonempty regular file')
+            extents = volume.extents(inode.private_id)
+            if len(extents) != 1 or extents[0][0] != 0 or not extents[0][2] or extents[0][1] < inode.size:
+                raise ValueError(name + ': firmware is not in one contiguous extent')
+            actual = inode.contents()
+            expected = (Path(firmware) / name).read_bytes()
+            if actual != expected:
+                raise ValueError(name + ': differs from local Renoir firmware')
+            print(name, len(actual), 'APFS plain, SHA256', hashlib.sha256(actual).hexdigest())
+    finally:
+        container.close()
+
 
 if __name__ == '__main__':
-    if len(sys.argv) not in (2,3):
-        sys.exit('usage: check_renoir_gpu_ramdisk.py RAM.packfs [fw-gpu/renoir]')
+    if len(sys.argv) not in (2, 3):
+        sys.exit('usage: check_renoir_gpu_ramdisk.py RAM.apfs [fw-gpu/renoir]')
     try:
-        check(sys.argv[1],sys.argv[2] if len(sys.argv)==3 else Path(__file__).resolve().parents[1]/'fw-gpu/renoir')
-    except (ValueError,OSError,struct.error) as error:
+        check(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else Path(__file__).resolve().parents[1] / 'fw-gpu/renoir')
+    except (ValueError, OSError, apfs.ApfsError) as error:
         sys.exit(str(error))

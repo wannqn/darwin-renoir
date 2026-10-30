@@ -163,7 +163,7 @@ test_files(void)
 	unsigned char *map;
 
 	printf("\n-- read-only filesystem --\n");
-	check(list_tree(*base ? base : "/", 3) >= 8, "packfs: walk our image (readdir, lstat, readlink)");
+	check(list_tree(*base ? base : "/", 3) >= 8, "apfs: walk our image (readdir, lstat, readlink)");
 	check(stat("/usr/lib/dyld", &st) != 0 || st.st_size > 100000, "the system image has the dynamic linker");
 
 	fd = open(in_image("/etc/motd"), O_RDONLY, 0);
@@ -583,6 +583,48 @@ read_whole(const char *path, char *buf, size_t size)
 	close(fd);
 	buf[got] = 0;
 	return (ssize_t)got;
+}
+
+/* Darwin statfs64 ABI (bsd/sys/mount.h); this static PID1 has no SDK libc. */
+struct boot_statfs {
+	uint32_t bsize;
+	int32_t iosize;
+	uint64_t blocks, bfree, bavail, files, ffree;
+	int32_t fsid[2];
+	uint32_t owner, type, flags, subtype;
+	char fstypename[16], mntonname[1024], mntfromname[1024];
+	uint32_t flags_ext, reserved[7];
+};
+
+static void
+check_mount(const char *path, const char *type, int readonly)
+{
+	struct boot_statfs fs;
+	int ok;
+
+	memset(&fs, 0, sizeof(fs));
+	ok = mini_syscall(345 /* statfs64 */, (long)path, (long)&fs, 0, 0, 0, 0) == 0;
+	printf("init: mount %s type=%s source=%s flags=0x%x\n", path,
+	    ok ? fs.fstypename : "unavailable", ok ? fs.mntfromname : "?", fs.flags);
+	check(ok && strcmp(fs.fstypename, type) == 0 && strcmp(fs.mntonname, path) == 0 &&
+	    !!(fs.flags & MNT_RDONLY) == readonly, path);
+}
+
+static void
+check_ram_var(void)
+{
+	static const char path[] = "/private/var/.apfs-ram-smoke";
+	static const char value[] = "APFS RAM boot, writable ramfs var";
+	char got[sizeof(value)];
+	int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+	int ok = fd >= 0 && write(fd, value, sizeof(value)) == sizeof(value) &&
+	    lseek(fd, 0, SEEK_SET) == 0 && read(fd, got, sizeof(got)) == sizeof(got) &&
+	    memcmp(value, got, sizeof(value)) == 0;
+
+	if (fd >= 0) {
+		close(fd);
+	}
+	check(ok && unlink(path) == 0, "/private/var: write/read/unlink in RAM");
 }
 
 static void
@@ -1137,7 +1179,13 @@ main(int argc, char **argv, char **envp)
 	printf("\n=== init: process %d, started as %s ===\n", getpid(), argc > 0 ? argv[0] : "?");
 
 	show_system();
+	check_mount("/", "apfs", 1);
+	if (*base) {
+		check_mount("/redwood", "apfs", 1);
+	}
 	mount_writable();
+	check_mount("/private/var", "ramfs", 0);
+	check_ram_var();
 
 	test_files();
 	test_writable();

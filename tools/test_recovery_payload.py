@@ -6,7 +6,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'recovery'))
-from payload import prepare, validate_mac
+from payload import prepare, validate_apfs, validate_mac
 
 
 def pack(items):
@@ -32,6 +32,20 @@ def unpack(data):
         result[name] = data[offset:offset + size]
         offset += (size + 15) & ~15
     raise AssertionError('Missing terminator')
+
+
+def apfs_image():
+    header = bytearray(4096)
+    header[32:36] = b'NXSB'
+    struct.pack_into('<IQ', header, 36, 4096, 1)
+    first = second = 0
+    for word in struct.unpack_from('<1022I', header, 8):
+        first = (first + word) % 0xffffffff
+        second = (second + first) % 0xffffffff
+    low = 0xffffffff - (first + second) % 0xffffffff
+    high = 0xffffffff - (first + low) % 0xffffffff
+    struct.pack_into('<Q', header, 0, (high << 32) | low)
+    return bytes(header)
 
 
 class PayloadTests(unittest.TestCase):
@@ -69,6 +83,39 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(result[b'kernel'], b'new')
         self.assertIn(b'wifi_mac=02:aa:bb:cc:dd:ee', result[b'cmdline'])
         self.assertEqual(result[b'cmdline'].count(b'epoch='), 1)
+
+    def test_extra_boot_args_replace_same_name_and_survive_epoch_refresh(self):
+        data = pack(self.items[:2] + [(b'cmdline', b'-v touchscreen=1 fb_double=1 epoch=1\0')])
+        first = prepare(data, 2, cpu_count=8, boot_args=['touchscreen=0', 'touch_lat=1', 'cpus=4'])
+        words = unpack(prepare(first, 3))[b'cmdline'].rstrip(b'\0').split()
+        self.assertEqual([w for w in words if w.startswith(b'touchscreen=')], [b'touchscreen=0'])
+        self.assertEqual([w for w in words if w.startswith(b'cpus=')], [b'cpus=4'])
+        self.assertIn(b'touch_lat=1', words)
+        self.assertIn(b'fb_double=1', words)
+        self.assertEqual([w for w in words if w.startswith(b'epoch=')], [b'epoch=3'])
+        with self.assertRaisesRegex(ValueError, 'Invalid boot argument'):
+            prepare(data, 1, boot_args=['two words'])
+
+    def test_apfs_ramdisk_replaces_legacy_embedded_root(self):
+        root = apfs_image()
+        result = unpack(prepare(self.data, 1, kernel=b'APFS kernel', ramdisk=root))
+        self.assertEqual(result[b'ramdisk'], root)
+        self.assertEqual(result[b'kernel'], b'APFS kernel')
+        self.assertEqual(unpack(self.data)[b'ramdisk'], self.items[1][1])
+
+    def test_apfs_replacement_requires_embedded_ramdisk(self):
+        with self.assertRaisesRegex(ValueError, 'no ramdisk'):
+            prepare(pack([self.items[0], self.items[2]]), 1, ramdisk=apfs_image())
+
+    def test_apfs_rejects_packfs_truncation_checksum_and_length(self):
+        image = apfs_image()
+        corrupt = bytearray(image)
+        corrupt[80] ^= 1
+        for data, length in [(b'PACKFS1', 4096), (image[:100], 4096),
+                             (corrupt, 4096), (image, 8192)]:
+            with self.subTest(length=length, size=len(data)), self.assertRaises(ValueError):
+                validate_apfs(data, length)
+        validate_apfs(image, len(image))
 
     def test_bad_inputs(self):
         for data in (b'', self.data[:-1], b'FAIL' + self.data[4:],

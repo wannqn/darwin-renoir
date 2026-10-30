@@ -1,0 +1,10 @@
+# Commands run by the launchd job com.redwood.demo (see com.redwood.demo.plist).
+# Latency/smoothness comparison (boot-arg touch_lat=1; tools/frames.py): unlock, 60 s for start-up work to
+# settle, then three rounds of: home-screen page swipes both ways; Settings opened (zoom), its list flung
+# down and up, closed with the home gesture; Notes opened and closed; Clock opened and closed.
+# Same gestures, same order, every run: compare runs only with each other.
+/redwood/bin/rwtouch wait 30 swipe 0.5 0.985 0.5 0.3 200 wait 60
+/redwood/bin/cpu_test 1
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 3 tap 0.845 0.71 wait 3 swipe 0.5 0.8 0.5 0.3 150 wait 2 swipe 0.5 0.3 0.5 0.8 150 wait 2 swipe 0.5 0.995 0.5 0.55 150 wait 3 tap 0.38 0.48 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3 tap 0.845 0.48 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 3 tap 0.845 0.71 wait 3 swipe 0.5 0.8 0.5 0.3 150 wait 2 swipe 0.5 0.3 0.5 0.8 150 wait 2 swipe 0.5 0.995 0.5 0.55 150 wait 3 tap 0.38 0.48 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3 tap 0.845 0.48 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 3 tap 0.845 0.71 wait 3 swipe 0.5 0.8 0.5 0.3 150 wait 2 swipe 0.5 0.3 0.5 0.8 150 wait 2 swipe 0.5 0.995 0.5 0.55 150 wait 3 tap 0.38 0.48 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3 tap 0.845 0.48 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3

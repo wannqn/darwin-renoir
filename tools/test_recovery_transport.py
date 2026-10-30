@@ -24,18 +24,18 @@ class TransportTests(unittest.TestCase):
     def test_real_error_visible(self):
         self.run.side_effect = subprocess.CalledProcessError(1, [], stderr='FAILED (remote: bad size)\n')
         with self.assertRaisesRegex(SystemExit, 'remote: bad size'):
-            self.cmd('stage', 'system.packfs', serial='xnuloader')
+            self.cmd('stage', 'system.apfs', serial='xnuloader')
 
     def test_live_upload(self):
-        self.cmd('stage', 'system.packfs', serial='xnuloader', timeout=900, live=True)
+        self.cmd('stage', 'system.apfs', serial='xnuloader', timeout=900, live=True)
         self.run.assert_called_once_with(
-            ['/usr/bin/fastboot', '-s', 'xnuloader', 'stage', 'system.packfs'],
+            ['/usr/bin/fastboot', '-s', 'xnuloader', 'stage', 'system.apfs'],
             capture_output=False, text=True, timeout=900, check=True)
 
     def test_timeout(self):
         self.run.side_effect = subprocess.TimeoutExpired([], 900)
         with self.assertRaisesRegex(SystemExit, 'timed out after 900 seconds'):
-            self.cmd('stage', 'system.packfs', timeout=900)
+            self.cmd('stage', 'system.apfs', timeout=900)
 
 
 if __name__ == '__main__':

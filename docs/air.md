@@ -508,11 +508,30 @@ figure to adjust.
 ## 1. Where the frontend lives: inside Mesa, as `src/compiler/air`
 
 **Decision: a Mesa frontend in Mesa's tree, shaped like `src/compiler/spirv`.** Its entry point
-is one function, `air_to_nir()` (`nir_air.h`), the analogue of `spirv_to_nir()`. In this
-repository the sources are `tools/mesa/air/`; `tools/mk-mesa.sh` and `tools/air/mk-host.sh` copy
-them to `src/compiler/air/` of the pinned Mesa release, exactly as `tools/mesa/redwood-drm/` is
-copied to `src/redwood-drm/`, and `tools/mesa/air.patch` adds the two lines of meson that build
-it. The tree is the shape an upstream merge request would have.
+is one function, `air_to_nir()` (`nir_air.h`), the analogue of `spirv_to_nir()`.
+There are now two explicitly separate build inputs:
+
+- The iOS GLES build (`tools/mk-mesa.sh`) pins **Mesa 26.2.5**. Its AIR and Darwin DRM
+  source comes from `tools/mesa/mesa26/mesa-26.2.5-op13.patch`, applied once by
+  `tools/mesa/prepare.py` and verified against the donor source manifest before the
+  Renoir A642 board patch. Never apply the historical Mesa25 patch stack on top,
+  or overwrite this tree with `tools/mesa/air`. The default GLES build does not
+  enable a Metal runtime; `AIR=1` requests the donor's optional `air_run` target.
+- The AIR host-development build (`tools/air/mk-host.sh`) remains on **Mesa 25.0.7**.
+  It links `tools/mesa/air/` into `src/compiler/air/` and applies the retained
+  `air-*.patch` and `ir3-*.patch` files. Those host sources and corpus results are
+  not evidence that the separate Mesa26 AIR frontend has been checked.
+
+On 30 October the clean Mesa26 iOS library and EAGL bridge builds passed. QEMU
+`gl_test` reported `Mesa; softpipe; OpenGL ES 3.1 Mesa 26.2.5`, `error=0`, and
+the expected RGB triangle (1054 of 4096 pixels). A separate Renoir cold-reset
+boot then reported `OpenGL ES 3.2 Mesa 26.2.5; FD642`, completed the seven
+existing shader prewarm paths, imported a BGRA 1125×2436 IOSurface and rendered
+the first two GPU frames; the desktop screenshot showed intact icons, text
+and wallpaper. See [the hardware evidence](renoir-gpu-investigation.md).
+These are GLES checks, not validation of AIR, Metal, performance, tearing or
+long-term regressions. The historical AIR measurements below retain their
+original scope; they were not rerun against the donor frontend.
 
 Why not a standalone library that Mesa links:
 
@@ -1287,12 +1306,18 @@ M2 count (262) differ.
 
 ### 5a. Is there a path from a `nir_shader` to a draw on the phone? Yes.
 
+This section records the earlier Mesa25/Adreno 7c+ Gen 3 harness work. It is not
+a new Mesa26 AIR or Renoir GPU validation; the current build split is described
+in section 1.
+
 This was the open question, because nothing here had run. The answer is that the harness can ride
 the Mesa already on the phone rather than being built from nothing:
 
 - The port's Mesa **already creates a Gallium screen for the Adreno**:
-  `osmesa_create_gpu_screen()` in `tools/mesa/freedreno-darwin.patch` opens the kernel's `msm`
-  driver through `tools/mesa/redwood-drm` and calls `fd_drm_screen_create_renderonly()`. It also
+  `osmesa_create_gpu_screen()` (now reconstructed as
+  `src/gallium/targets/osmesa/osmesa_target.c` by the consolidated patch) opens the
+  kernel's `msm` driver through `src/redwood-drm` and calls
+  `fd_drm_screen_create_renderonly()`. It also
   already has `osmesa_surface_resource()`, which wraps an IOSurface as a `pipe_resource`. So the
   Gallium layer is reachable inside the library CoreAnimation already draws iOS through.
 - **freedreno takes NIR natively** (`PIPE_SHADER_CAP_SUPPORTED_IRS` includes
@@ -1302,9 +1327,9 @@ the Mesa already on the phone rather than being built from nothing:
   screen (`sw_screen_create(null_sw_create())`); on the phone it wants the screen
   `osmesa_create_gpu_screen()` makes, and **no line below that changes**.
 
-**That is now built and in the image, and no export was needed.** `air_run` is built *inside* the
-Mesa cross build (`AIR=1 tools/mk-mesa.sh`), so it links Gallium's own static libraries and opens
-the Adreno itself — `drmOpenWithType("msm", …)` through `tools/mesa/redwood-drm`, then
+**That Mesa25 harness was built and put in the image, and no export was needed.** The
+optional command remains `AIR=1 tools/mk-mesa.sh`; it builds `air_run` *inside* Mesa, so it links Gallium's own static libraries and opens
+the Adreno itself — `drmOpenWithType("msm", …)` through `src/redwood-drm`, then
 `fd_drm_screen_create_renderonly()`, exactly as `osmesa_create_gpu_screen()` does. It needs
 nothing exported from `libOSMesa` and does not load it: a 9.8 MB arm64 Mach-O against libSystem,
 libz and IOKit alone. `userland/build.sh` puts it in `/redwood/bin`, and `rc.jobs.air` runs it.
@@ -1502,9 +1527,10 @@ GitHub). `check.sh` is the CI; it takes about five minutes, most of it the two p
 the frontend, and the report it writes is committed as `docs/air-report.md` with the numbers of
 that commit.
 
-The frontend lives in `tools/mesa/air/` and `mk-host.sh` links it into the pinned Mesa as
-`src/compiler/air` — a link, not a copy, so there is no stale copy to build by mistake (a trap
-this project has already fallen into once with `tools/mk-mesa.sh` and the freedreno patches).
+The host-development frontend lives in `tools/mesa/air/` and `mk-host.sh` links it into
+Mesa 25.0.7 as `src/compiler/air` — a link, not a copy, so there is no stale copy
+to build by mistake. The iOS Mesa26 cross build instead reconstructs its own donor
+frontend from the consolidated source patch; these are not interchangeable trees.
 `tools/mesa/air-ir3.patch` is the two-file change that teaches `ir3_compiler` to read AIR and
 declares `air_run` beside it; it also removes a call of `ir3_nir_lower_variant` that tool makes
 itself, which is a bug of the tool — `ir3_context_init` already calls it on its own clone, and
@@ -1513,15 +1539,15 @@ anything with image dimensions, and hid on everything else.
 
 **That bug cannot be sent upstream, because the file is gone: `ir3_cmdline` was deleted from
 Mesa on 2025-07-23** ("freedreno: remove ir3_cmdline — Nobody is using it anymore", 986530d2,
-MR 36313). It is real in the 25.0.7 this port pins, and in every release before the deletion,
+MR 36313). It is real in the 25.0.7 the host build pins, and in every release before the deletion,
 and in nothing that upstream still carries. The other half of it is untouched in main
 (`ir3_context.c` still calls `ir3_nir_lower_variant`), and with no second caller there is
 nothing wrong there. So there is no report to file; checking before writing one saved a
 maintainer the time.
 
 It leaves a consequence worth being plain about: **the `ir3` column of the corpus report rests on
-a tool upstream has deleted.** While the port stays on Mesa 25.0.7 that is fine — the tool is in
-the tarball and the patch applies — but it is not a route that survives a Mesa upgrade, and it
+a tool upstream has deleted.** The host tooling still stays on Mesa 25.0.7 — the tool is in
+that tarball and its host patch applies — but this is not a Mesa26 validation route, and it
 could never have been upstreamed. `air_run` does not share the problem: it uses the ordinary
 Gallium interface (`screen->context_create`, `create_fs_state`, `draw_vbo`), which is what the
 drivers and the port's own Mesa are built on. The durable way to get the `ir3` number after an

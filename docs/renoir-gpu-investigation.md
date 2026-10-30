@@ -45,3 +45,99 @@ physical panel phase was verified on this boot. Do not write display registers
 or substitute a TE wait on the basis of the Android tree alone; that could
 hang this device. The panel's UEFI profile requests 60 Hz; increasing only the
 software-reported rate does not change the panel's refresh.
+
+## APFS RAM boot and Mesa 26.2.5 (2026-10-30)
+
+The previous working tree was committed and pushed as `a683cb05` before this
+cutover. The current source builds Mesa 26.2.5 from the verified consolidated
+`ios-dodge` donor patch plus a Renoir A642/Gen6 device profile; Gen8/OnePlus
+hardware configuration is not used for Renoir.
+
+Both APFS images passed `apfsck -cw` and independent content verification:
+61,249 entries for the 2,495,967,232-byte system image and 484 entries for the
+14,397,440-byte supplemental image. The preserved packfs recovery artifacts
+remain inputs for conversion and the explicitly paired `--last-phone-good`
+legacy boot; the default boot uses APFS images.
+
+The physical phone boot confirmed:
+
+- `/`: read-only APFS, flags `0x4005001`.
+- `/redwood`: read-only APFS on `/dev/md1`, flags `0x4001001`.
+- `/private/var`: writable ramfs, flags `0x4001000`; explicit
+  write/read/unlink succeeded.
+- PID1 smoke checks: `40 checks, 0 failed`.
+- CoreAnimation: `OpenGL ES 3.2 Mesa 26.2.5; FD642`, GLSL ES 3.20, shader
+  preparation and BGRA IOSurface import followed by GPU-rendered frames.
+- A fresh loader screenshot showed the home screen with text, icons and
+  wallpaper. Some widget content was still unloaded.
+
+Separately, QEMU exercised Mesa's explicit software path: `softpipe`, OpenGL
+ES 3.1 Mesa 26.2.5. A 64x64 triangle readback reported GL error 0, correct
+red/green/blue corner samples and 1,054 covered pixels out of 4,096. QEMU
+does not validate the physical GPU.
+
+The first phone attempt returned during GPU step 20 before userspace. After
+booting Android far enough for SurfaceFlinger to initialize, then returning
+to stock fastboot, the APFS/Mesa boot succeeded. Re-entering the resident
+loader alone is not evidence of a fresh GPU state.
+
+No controlled before/after animation-latency comparison, sustained GPU stress
+test or physical tear-free scanout verification was completed for this
+cutover. A shadow-buffer copy, including a parallel copy, is not an atomic
+page flip and does not establish TE/vblank synchronization.
+
+## UI latency measurement and fixes (2026-10-30)
+
+All runs were RAM-only: Android booted until SurfaceFlinger was up, `adb reboot bootloader`,
+`fastboot boot` of the resident loader, then the APFS system and payload staged and run. Nothing was
+flashed. Each run used the same scripted gestures (`RC_JOBS=rc.jobs.latency-bench`: home-screen page
+swipes, Settings opened/scrolled/closed, Notes and Clock opened/closed, three rounds) with
+`touch_lat=1 touchscreen=0`, so physical touches could not disturb it:
+
+```sh
+SHARE=1 GL=1 RC_JOBS=rc.jobs.latency-bench userland/build.sh
+python3 recovery/boot.py --boot-arg touch_lat=1 --boot-arg touchscreen=0
+# about four minutes later, from the resident loader
+fastboot -s xnuloader oem log && fastboot -s xnuloader get_staged RUN.log
+python3 tools/smoothness.py RUN.log
+```
+
+`tools/smoothness.py` counts refreshes missed during the 0.7 s after each touch (the gesture and its
+main animation) and charges each to the stage that held the frame. `tools/frames.py` counts every
+frame step over 16.7 ms, which uneven but complete pacing inflates; later frames after an animation
+are not missed refreshes. Runs of the same build varied by about two percentage points.
+
+| Build | Frames/s in gestures | Refreshes missed | SpringBoard busy | Render CPU | GPU | Present |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before (checkpoint kernel) | 46.8 | 23.0% (178) | 62 | 61 | 28 | 22 |
+| Current defaults | 50.1 | 16.8% (128) | 64 | 26 | 29 | 6 |
+
+Changes that produced this:
+
+- `to_memory()` is `dc civac` again and the IOSurface flush rule is the donor's (`!b->seen`,
+  `GPU_PUSH_AGAIN_MS` 4). The earlier `dc cvac` change let `gmu_data()` and CPU reads of
+  GPU-written memory see stale lines; the `seen` removal could hand the GPU unflushed CPU writes.
+- The presenter gives back a swap's queue slot only after the frame is in the panel's memory, and
+  drops a swap whose surface the GPU has not finished instead of showing it.
+- `fb_double` defaults to 0. The shadow copy hid no tear without TE or a page flip, and measured
+  5.4 ms instead of 3.1 ms per presented frame (median), with about twice as many window-server
+  frames over 16 ms.
+
+Measured and ruled out: kernel vsync delivery (no tick over 1 ms late, no notification toggles);
+CPU clocks (1.8–2.2 GHz measured by `cpu_test`); GPU submit cache flushes (0.1–0.2 ms per
+submission); `gpu_cached=1` (worse); big cores only (`cpus=4`, same); nearest-neighbour scaling
+(within noise).
+
+Remaining misses are mostly outside this driver:
+
+- Half come from SpringBoard's main thread running 100–350 ms turns at the start of the home
+  gesture and on app launch. `sb_sample=1` (with `touch_lat=1`) samples that thread every
+  millisecond and logs where long turns spend time (`tl: A`, `tl: B`): about 90% is CPU time in
+  SpringBoard/UIKit/BaseBoard transition code with no single hotspot. On the first launch of an
+  app, about 100 ms more is a synchronous wait for SplashBoard launch-image generation; `/var` is
+  RAM, so this repeats after every boot.
+- The rest is the window server's own CPU drawing through Mesa and GPU time on heavy transition
+  frames.
+
+Not done: hardware page flipping or TE-synchronized presentation (no verified TE source on Renoir),
+and 90/120 Hz (the panel runs at 60 Hz).

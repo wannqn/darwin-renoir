@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as tmp:
     job('com.apple.CommCenter','/usr/libexec/CommCenter')
     job('com.test.safari','/System/Cryptexes/App/usr/libexec/web-helper',cryptex='cryptex-app')
     job('com.test.os','/System/Cryptexes/OS/usr/libexec/os-helper',cryptex='cryptex')
-    job('com.test.absent','/usr/libexec/not-in-packfs',False)
+    job('com.test.absent','/usr/libexec/not-in-image',False)
     job('com.test.absent-cryptex','/System/Cryptexes/App/usr/libexec/not-extracted',False)
     env=os.environ.copy();env.pop('ALLOW',None)
     subprocess.run([sys.executable,str(SCRIPT),'--rest',str(root),str(dest)],env=env,check=True,stdout=subprocess.DEVNULL)

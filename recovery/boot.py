@@ -2,7 +2,7 @@
 """Boot restored Renoir RAM images. No flashing, erasing or storage commands."""
 from pathlib import Path
 import os, shutil, subprocess, time, argparse, re
-from payload import prepare, validate_mac
+from payload import prepare, validate_apfs, validate_mac
 R=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser(description=__doc__)
 def mac_argument(value):
@@ -10,8 +10,9 @@ def mac_argument(value):
  except ValueError as error:raise argparse.ArgumentTypeError(str(error)) from error
 p.add_argument('--wifi-mac',type=mac_argument,metavar='MAC',help='this handset\'s device Wi-Fi MAC; colons optional; prompted if omitted')
 images=p.add_mutually_exclusive_group()
-images.add_argument('--last-phone-good',action='store_true',help='use the archived earlier kernel/root instead of the current Wi-Fi fixes')
+images.add_argument('--last-phone-good',action='store_true',help='explicit legacy packfs boot: archived earlier kernel/root and preserved system.packfs')
 images.add_argument('--kernel',type=Path,help='override the current prebuilt kernel with a rebuilt kernel')
+p.add_argument('--boot-arg',action='append',default=[],metavar='NAME[=VALUE]',help='add (or replace) one kernel boot argument for this boot, e.g. touch_lat=1; repeatable')
 options=p.parse_args()
 while options.wifi_mac is None:
  try:options.wifi_mac=validate_mac(input('Enter this Renoir\'s Wi-Fi MAC. (colons optional: AABBCCDDEEFF or AA:BB:CC:DD:EE:FF) Do NOT be lazy and reuse another MAC, boot a ROM and note your Renoir\'s MAC: '))
@@ -40,15 +41,21 @@ def check(serial,key,value):
  q=cmd('getvar',key,serial=serial)
  match=re.search(r'(?m)^\s*(?:\(bootloader\)\s*)?'+re.escape(key)+r':\s*(\S+)\s*$',q.stdout+q.stderr)
  if match is None or match[1]!=value:raise SystemExit('Wrong device: expected '+key+' '+value)
-for p in ['userland/system.packfs',payload,'prebuilt/renoir/resident-usb.img']:
- if not (R/p).is_file():raise SystemExit('Run recovery/restore.py first: missing '+p)
+system_image='userland/system.packfs' if options.last_phone_good else 'userland/system.apfs'
+required=[system_image,payload,'prebuilt/renoir/resident-usb.img']
+if not options.last_phone_good:required.append('userland/root.apfs')
+for p in required:
+ if not (R/p).is_file():raise SystemExit('Missing '+p+'. Restore archived assets with recovery/restore.py; build APFS images with SHARE=1 userland/build.sh.')
 # Validate local inputs before changing the phone's boot state.
 try:
  mac=options.wifi_mac
  kernel_path=options.kernel or R/'prebuilt/mach.development.bcm2837'
  kernel=None if options.last_phone_good else kernel_path.read_bytes()
+ root=None if options.last_phone_good else (R/'userland/root.apfs').read_bytes()
+ if root is not None:
+  with (R/system_image).open('rb') as image:validate_apfs(image.read(4096),(R/system_image).stat().st_size)
  data=prepare((R/payload).read_bytes(),time.time(),wifi_mac=mac,kernel=kernel,
-              cpu_count=None if options.last_phone_good else 8)
+              cpu_count=None if options.last_phone_good else 8,ramdisk=root,boot_args=options.boot_arg)
 except (OSError,ValueError) as error:raise SystemExit(str(error))
 dev=devices()
 if len(dev)!=1:raise SystemExit('Connect exactly one phone in fastboot mode')
@@ -61,8 +68,8 @@ if s!='xnuloader':
   time.sleep(1)
  else:raise SystemExit('Resident loader did not appear; do not flash anything')
 s='xnuloader';check(s,'board','renoir');cmd('oem','ramdisk',serial=s)
-print(f'Uploading system RAM image ({(R/"userland/system.packfs").stat().st_size/1e9:.2f} GB; fastboot progress follows)...',flush=True)
-cmd('stage',file('userland/system.packfs'),serial=s,timeout=900,live=True)
+print(f'Uploading system RAM image ({(R/system_image).stat().st_size/1e9:.2f} GB; fastboot progress follows)...',flush=True)
+cmd('stage',file(system_image),serial=s,timeout=900,live=True)
 # Refresh time after the large system upload; keep archived release assets intact.
 data=prepare(data,time.time())
 (R/'recovery/assets/run-current.bin').write_bytes(data)
